@@ -18,6 +18,8 @@ test(
         PORT: '0',
         HOST: '127.0.0.1',
         OPERATOR_TOKEN: token,
+        SESSION_SECRET: 'integration-only-session-secret',
+        PUBLIC_TRY: 'true',
         DATA_DIR: directory,
       },
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -55,7 +57,9 @@ test(
         });
       await t.test('health works without leaking operator data', async () => {
         assert.equal((await fetch(url + '/healthz')).status, 200);
-        assert.equal((await fetch(url + '/api/status')).status, 401);
+        const publicStatus = await fetch(url + '/api/status');
+        assert.equal(publicStatus.status, 200);
+        assert.equal((await publicStatus.json()).operator, false);
       });
       await t.test('foreign-origin mutations are rejected', async () => {
         const r = await call('/api/jobs', {
@@ -82,6 +86,56 @@ test(
         assert.equal(telemetry.features.length, 4);
         assert.ok(telemetry.features.every((v) => Number.isInteger(v) && v >= 0 && v <= 100));
       });
+      const firstVisitor = await fetch(url + '/api/status');
+      const visitorCookie = firstVisitor.headers.getSetCookie()[0].split(';')[0];
+      const visitorCall = (endpoint, options = {}) =>
+        fetch(url + endpoint, {
+          ...options,
+          headers: {
+            Cookie: visitorCookie,
+            'Content-Type': 'application/json',
+            ...options.headers,
+          },
+        });
+      await t.test(
+        'public sessions are isolated and operator-only telemetry stays private',
+        async () => {
+          const guestStatus = await (await visitorCall('/api/status')).json();
+          assert.equal(guestStatus.operator, false);
+          assert.equal(guestStatus.publicTry, true);
+          assert.equal(guestStatus.reward, '0.000001');
+          assert.equal(guestStatus.sponsoredLimits.globalPerDay, 20);
+          assert.equal((await visitorCall('/api/telemetry')).status, 403);
+        },
+      );
+      const publicRequest = await visitorCall('/api/jobs', {
+        method: 'POST',
+        headers: { 'Idempotency-Key': 'visitor-owned-request-1' },
+        body: JSON.stringify({ name: 'Visitor pilot', features: [35, 42, 4, 20] }),
+      });
+      assert.equal(publicRequest.status, 201);
+      const publicJob = await publicRequest.json();
+      const secondVisitorResponse = await fetch(url + '/api/status');
+      const secondVisitorCookie = secondVisitorResponse.headers.getSetCookie()[0].split(';')[0];
+      const secondVisitorJobs = await fetch(url + '/api/jobs', {
+        headers: { Cookie: secondVisitorCookie },
+      });
+      await t.test(
+        'public visitor requests stay private to their signed browser session',
+        async () => {
+          assert.equal((await secondVisitorJobs.json()).length, 0);
+          assert.equal(
+            (
+              await fetch(url + `/api/jobs/${publicJob.id}/bundle`, {
+                headers: { Cookie: secondVisitorCookie },
+              })
+            ).status,
+            404,
+          );
+          const own = await (await visitorCall('/api/jobs')).json();
+          assert.ok(own.some((j) => j.id === publicJob.id));
+        },
+      );
       const request = await call('/api/jobs', {
         method: 'POST',
         body: JSON.stringify({ name: 'API integration', features: [35, 42, 4, 20] }),
@@ -90,6 +144,12 @@ test(
       const job = await request.json();
       assert.equal('features' in job, false);
       assert.equal('salt' in job, false);
+      await t.test('a public visitor cannot discover operator requests', async () => {
+        const guestJobs = await (await visitorCall('/api/jobs')).json();
+        assert.equal(guestJobs.length, 1);
+        assert.equal(guestJobs[0].id, publicJob.id);
+        assert.equal((await visitorCall(`/api/jobs/${job.id}/bundle`)).status, 404);
+      });
       let settled;
       const deadline = Date.now() + 30000;
       while (Date.now() < deadline) {

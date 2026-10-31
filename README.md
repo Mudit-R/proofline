@@ -4,11 +4,21 @@
 
 [![Proof and settlement checks](https://github.com/Mudit-R/proofline/actions/workflows/ci.yml/badge.svg)](https://github.com/Mudit-R/proofline/actions/workflows/ci.yml)
 
-Proofline is an end-to-end computational-integrity workbench: a worker evaluates a trained telemetry classifier, generates a real Groth16 zero-knowledge proof, and submits it to a Solidity verifier. An escrow contract checks the request context before accepting the result and crediting the worker. The dashboard displays actual job states, proof timing, EVM receipts, rewards, and adversarial checks.
+Proofline is an end-to-end computational-integrity workbench: a worker evaluates a trained telemetry classifier, generates a real Groth16 zero-knowledge proof, and submits it to a Solidity verifier. An escrow contract checks the request context before accepting the result and crediting the worker. The dashboard displays actual job states, proof timing, EVM receipts, rewards, and adversarial checks. The same flow supports a local EVM and a deployed Ethereum Sepolia release.
 
 ![Proofline dashboard displaying real settled local-chain requests](docs/dashboard.png)
 
-It demonstrates how an application can accept outsourced computation without taking the worker's word for the answer. This release uses a local EVM with disposable funds. It is not a public-chain deployment, an audited payment protocol, or a Ritual integration.
+It demonstrates how an application can accept outsourced computation without taking the worker's word for the answer. The public testnet deployment uses faucet-funded Sepolia ETH only. It is an experimental pilot, not an audited payment protocol, a production anomaly detector, or a Ritual integration.
+
+### Sepolia deployment
+
+The verifier and escrow consumer are deployed on Ethereum Sepolia and matched against this repository's pinned circuit artifacts and model:
+
+- Consumer: [`0xb196Da6761E94bd4D805b2102BcbFCb3fD29c278`](https://sepolia.etherscan.io/address/0xb196Da6761E94bd4D805b2102BcbFCb3fD29c278)
+- Groth16 verifier: [`0x043F4361143443ba64615FFBAF017ccc212Bb982`](https://sepolia.etherscan.io/address/0x043F4361143443ba64615FFBAF017ccc212Bb982)
+- Deployment and end-to-end request/settlement receipts: [`deployments/sepolia.json`](deployments/sepolia.json)
+
+See [deployment](docs/DEPLOYMENT.md) for the hosted blueprint and important free-tier limits. A hosted public request is only live after the Render deployment finishes and its end-to-end transaction is verified; this repository does not imply an online service is already available.
 
 ## Run the whole application
 
@@ -58,7 +68,7 @@ Context fields participate in the circuit's Poseidon computation; they are not u
 ```mermaid
 flowchart LR
     UI[Dashboard / API] -->|input commitment + test reward| EVM[Solidity escrow]
-    UI -->|private features + salt| Q[SQLite queue]
+    UI -->|private features + salt| Q[Durable job store]
     Q --> W[Isolated proof worker]
     W --> C[Circom witness + Groth16 proof]
     C --> V[Local cryptographic verification]
@@ -82,7 +92,7 @@ Each model version currently has its own immutable verifier and consumer deploym
 
 ## Evidence and tests
 
-The **29-test** protocol and API suite covers genuine healthy and elevated-risk proofs, invalid feature ranges, model substitution, changed outputs and commitments, wrong domains and requesters, front-running, malformed curve points, duplicate settlement, expiry, refunds, withdrawals, authentication, transaction receipts and input privacy. See [executed validation](docs/VALIDATION.md). The checked-in [sample proof bundle](docs/evidence/sample-proof.json) includes the verification key and measured local settlement data. Reproduce it with:
+The **34-test** protocol, authenticated API and PostgreSQL suite covers genuine proofs, invalid feature ranges, model substitution, changed outputs and commitments, wrong domains and requesters, front-running, malformed curve points, duplicate settlement, expiry, refunds, withdrawals, guest-session isolation, retention, sponsored limits, PostgreSQL quotas and input privacy. See [executed validation](docs/VALIDATION.md). The checked-in [sample proof bundle](docs/evidence/sample-proof.json) includes the verification key and measured local settlement data. Reproduce it with:
 
 ```sh
 npm run setup
@@ -94,20 +104,20 @@ The example bundle is from a local chain. Do not interpret its transaction hash 
 
 ## Deployment and security
 
-The Docker image serves the production UI and API on one port, provides a health endpoint, runs as an unprivileged user, serializes proof work in a child process, bounds the proof queue, and persists state. See [deployment](docs/DEPLOYMENT.md), [threat model](docs/SECURITY.md), and [architecture](docs/ARCHITECTURE.md) before exposing an instance.
+The Docker image serves the UI and API on one port, provides a health endpoint, runs as an unprivileged user, serializes proof work in a child process, bounds the proof queue, and persists state. Local runs use SQLite; hosted runs use a separately provisioned PostgreSQL database. Public Sepolia mode scopes request history to signed browser sessions, caps sponsored usage, disables public telemetry and withdrawals, and pauses when testnet balances are low. See [deployment](docs/DEPLOYMENT.md), [threat model](docs/SECURITY.md), and [architecture](docs/ARCHITECTURE.md) before exposing an instance.
 
-The default setup is a **single-machine development ceremony**. A trusted setup verified by tooling is not the same as a production multi-party ceremony with independent contributions. No security audit, production trust, public testnet integration, or Ritual integration is claimed.
+The default setup is a **single-machine development ceremony**. A trusted setup verified by tooling is not the same as a production multi-party ceremony with independent contributions. No security audit, production trust, real-value custody, or Ritual integration is claimed.
 
 ## Source map
 
-| Directory    | Responsibility                                                  |
-| ------------ | --------------------------------------------------------------- |
-| `circuits/`  | Generated, inspectable inference constraints                    |
-| `contracts/` | Job lifecycle, proof verification, escrow and withdrawals       |
-| `models/`    | Frozen tree, provenance and held-out evaluation                 |
-| `server/`    | API, SQLite queue, process worker, cryptography and EVM adapter |
-| `web/`       | React dashboard, requests, model inspector and attack lab       |
-| `scripts/`   | Training, setup, independent verification and startup           |
-| `tests/`     | Real proof and chain integration tests                          |
+| Directory    | Responsibility                                                   |
+| ------------ | ---------------------------------------------------------------- |
+| `circuits/`  | Generated, inspectable inference constraints                     |
+| `contracts/` | Job lifecycle, proof verification, escrow and withdrawals        |
+| `models/`    | Frozen tree, provenance and held-out evaluation                  |
+| `server/`    | API, SQLite/PostgreSQL job store, process worker and EVM adapter |
+| `web/`       | React dashboard, requests, model inspector and attack lab        |
+| `scripts/`   | Training, setup, independent verification and startup            |
+| `tests/`     | Real proof and chain integration tests                           |
 
 The cryptographic implementation uses [snarkjs](https://github.com/iden3/snarkjs) and [circomlib](https://github.com/iden3/circomlib); the local EVM uses Ganache. Proofline does not implement a new proof system. Source licensing is GPL-3.0; see `LICENSE` and [third-party notices](docs/THIRD_PARTY.md).

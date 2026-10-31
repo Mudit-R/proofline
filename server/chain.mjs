@@ -18,7 +18,9 @@ export function compile() {
         settings: {
           optimizer: { enabled: true, runs: 200 },
           evmVersion: 'shanghai',
-          outputSelection: { '*': { '*': ['abi', 'evm.bytecode.object'] } },
+          outputSelection: {
+            '*': { '*': ['abi', 'evm.bytecode.object', 'evm.deployedBytecode.object'] },
+          },
         },
       }),
     ),
@@ -32,6 +34,7 @@ export function compile() {
 }
 export async function connectChain({ ephemeral = false, deploy = false } = {}) {
   const dataDir = process.env.DATA_DIR || '.local';
+  fs.mkdirSync(dataDir, { recursive: true });
   const demo = process.env.MODE !== 'external';
   let local;
   if (demo) {
@@ -47,18 +50,24 @@ export async function connectChain({ ephemeral = false, deploy = false } = {}) {
     });
   }
   const provider = demo
-    ? new ethers.BrowserProvider(local)
-    : new ethers.JsonRpcProvider(process.env.RPC_URL);
+    ? new ethers.BrowserProvider(local, undefined, { cacheTimeout: -1 })
+    : new ethers.JsonRpcProvider(
+        Object.assign(new ethers.FetchRequest(process.env.RPC_URL), { timeout: 15000 }),
+        undefined,
+        { cacheTimeout: -1, batchMaxCount: 1 },
+      );
+  provider.pollingInterval = 1000;
+  const accounts = demo ? Object.values(local.getInitialAccounts()) : null;
   const requester = demo
-    ? await provider.getSigner(0)
+    ? new ethers.Wallet(accounts[0].secretKey, provider)
     : new ethers.Wallet(process.env.REQUESTER_KEY, provider);
   const worker = demo
-    ? await provider.getSigner(1)
+    ? new ethers.Wallet(accounts[1].secretKey, provider)
     : new ethers.Wallet(process.env.WORKER_KEY, provider);
-  const thief = demo ? await provider.getSigner(2) : null;
+  const thief = demo ? new ethers.Wallet(accounts[2].secretKey, provider) : null;
   const contracts = compile();
   const model = JSON.parse(fs.readFileSync('models/sentinel.json'));
-  const deploymentPath = path.join(dataDir, 'deployment.json');
+  const deploymentPath = path.join(dataDir, demo ? 'deployment.json' : 'external-deployment.json');
   let address = process.env.CONTRACT_ADDRESS;
   if (!demo && !address && !deploy)
     throw new Error(
@@ -73,6 +82,7 @@ export async function connectChain({ ephemeral = false, deploy = false } = {}) {
       );
     address = saved.address;
   }
+  let deployment;
   if (!address) {
     const verifier = await new ethers.ContractFactory(
       contracts.verifier.abi,
@@ -87,15 +97,26 @@ export async function connectChain({ ephemeral = false, deploy = false } = {}) {
     ).deploy(await verifier.getAddress(), model.id);
     await consumer.waitForDeployment();
     address = await consumer.getAddress();
-    if (!ephemeral)
-      fs.writeFileSync(
-        deploymentPath,
-        JSON.stringify({ address, manifest: fs.readFileSync('artifacts/manifest.json', 'utf8') }),
-      );
+    deployment = {
+      chainId: (await provider.getNetwork()).chainId.toString(),
+      address,
+      verifier: await verifier.getAddress(),
+      verifierTx: verifier.deploymentTransaction().hash,
+      consumerTx: consumer.deploymentTransaction().hash,
+      modelId: model.id,
+      manifest: fs.readFileSync('artifacts/manifest.json', 'utf8'),
+    };
+    if (!ephemeral) fs.writeFileSync(deploymentPath, JSON.stringify(deployment, null, 2));
   }
   const contract = new ethers.Contract(address, contracts.consumer.abi, requester);
   if ((await contract.modelId()).toString() !== model.id)
     throw new Error('Deployed model does not match local model.');
+  const verifierAddress = await contract.verifier();
+  if (
+    (await provider.getCode(verifierAddress)).toLowerCase() !==
+    ('0x' + contracts.verifier.evm.deployedBytecode.object).toLowerCase()
+  )
+    throw new Error('Deployed verifier bytecode does not match pinned proving artifacts');
   return {
     demo,
     provider,

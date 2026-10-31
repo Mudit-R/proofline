@@ -1,0 +1,10 @@
+{
+  "setup": "single-machine development ceremony; requires independent ceremony for production trust",
+  "circuit": "6fd93a4ffebb916e797cdd96195f87568593fd310ed6c7dd114248cae53146f6",
+  "files": {
+    "inference.r1cs": "83cd68cc373a283e87296321df1a4879c11fc6bb64b283a03869f98d44c72875",
+    "inference.zkey": "e00a1f5fc62e50630a8b3b931def10f871db332a1f7ebb8e92843f78fd28f8a9",
+    "verification_key.json": "9af8ad26c8d5a6768a5660fb38ce0612f78b5db836937f45ecffe9770f015640",
+    "Groth16Verifier.sol": "c789233c4ce6f1f41e712d0543268e296823e85e40c720ed140725d056e06b67"
+  }
+}

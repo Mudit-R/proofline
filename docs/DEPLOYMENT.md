@@ -1,33 +1,33 @@
 # Deployment
 
-## Local / hosted demonstration
+## Render Blueprint
 
-Use `docker compose up --build -d`. The container bootstraps its circuit and local EVM, then serves the built frontend and API. The first startup can take several minutes; `/healthz` reports readiness after initialization. The compose file limits the container to 2 GB RAM and two CPUs and binds its port to loopback.
+The checked-in [`render.yaml`](../render.yaml) provisions one free Docker web service and a dedicated free PostgreSQL database in Oregon. It does not use the NextChapter or CelerLite database. To apply it from Render, connect `Mudit-R/proofline` as a Blueprint and review both resources before creation. Required wallet keys are marked `sync: false` and must be added as Render secrets; they are never committed. The generated session secret and operator token stay in the service environment.
 
-To host the demonstration, place the container behind a TLS reverse proxy on a VM with durable storage. Preserve both the state and artifact volumes. Set `OPERATOR_TOKEN` to a high-entropy secret if the instance should be operator-only. Set it using your host's secret manager, not a committed `.env`. Browser users enter it through Operator access; the browser keeps it in session storage. A public demo must remain in demo mode with disposable funds and requires upstream request limits.
+The service runs one instance. PostgreSQL holds visitor-scoped jobs, signed submissions and daily quotas. A database advisory lock prevents a second service process from using the same signer. Do not scale the API horizontally or copy signer keys into another instance.
 
-Never expose a local EVM RPC publicly: the bundled chain has no public listener. Start only one API/chain owner per data directory. Back up state and artifacts together. Deploy a new model/setup as a separate release and deployment rather than replacing a verifier under existing jobs.
+**Free-tier limits matter:** Render's free web service sleeps after 15 minutes without traffic, loses its local filesystem on restart, and has 512 MB RAM. Its free PostgreSQL database expires 30 days after creation (with a 14-day upgrade grace period). Export the database before expiration or the pilot's history will be lost. Render describes free instances as appropriate for testing and hobby projects, not production workloads. See [Render's free plan limits](https://render.com/docs/free) and [compute plans](https://render.com/docs/compute-plans). This deployment is therefore a public testnet pilot, not a production availability promise.
 
-## External EVM mode
+## Public Sepolia pilot
 
-External mode uses the same real verifier and settlement flow against a separately provisioned EVM RPC. Set `MODE=external`, `RPC_URL`, `REQUESTER_KEY`, `WORKER_KEY`, `CONTRACT_ADDRESS`, and `OPERATOR_TOKEN`. Provide an address deployed with this build's generated verifier and matching model ID. These keys are operator-managed; do not reuse the demo mnemonic. The API should run behind TLS and authentication.
+The repository pins a release's proving artifacts in `proof-assets/`; startup validates their checksums instead of performing a new trusted setup. The Sepolia consumer and verifier addresses and deployment transactions are recorded in [`deployments/sepolia.json`](../deployments/sepolia.json). `server/chain.mjs` checks the configured contract's model ID and verifier bytecode before accepting traffic. `scripts/deploy.mjs --testnet` only deploys to Sepolia; ordinary external-mode startup never auto-deploys.
 
-The initial implementation is validated on the bundled Ganache chain. Public-testnet deployment, RPC failure recovery, user wallets, real-value custody and Ritual's native execution interface have not been validated. Do not claim those integrations from a successful local demo. A public testnet rollout requires network selection, test funds, key provisioning, deployment receipts and additional integration tests.
+Set `MODE=external`, `RPC_URL`, `REQUESTER_KEY`, `WORKER_KEY`, `CONTRACT_ADDRESS`, and `OPERATOR_TOKEN`. Public sponsored mode additionally requires `PUBLIC_TRY=true` and a persistent `SESSION_SECRET`. It is Sepolia-only, pins the reward to `0.000001` test ETH, limits each browser to 3 requests/day, each network to 10/day, and the full service to 20/day, and pauses submissions when either signer falls below a `0.002` ETH reserve. It exposes only the visitor's own requests and disables operator telemetry and withdrawals. Completed history and old quota records are pruned after seven days; unresolved signed transactions remain for recovery. Testnet transactions and public commitments are visible on-chain; inputs and salts are sent to the proving operator and stored in the database while a job is processed.
 
-After provisioning Ethereum Sepolia test funds and the environment above, `node scripts/deploy.mjs --testnet` explicitly deploys the real verifier and consumer and prints their public addresses. Normal server startup never auto-deploys on an external network. The helper rejects mainnet chain IDs. This helper has not been exercised against a public testnet in this release.
-
-`DATA_DIR` can select a separate state directory for an isolated instance. The automated API tests use this to avoid modifying the interactive demonstration.
-
-## Independent proof verification
-
-Download a bundle from a settled request. With dependencies installed:
+After deploy, verify `/healthz`, open the dashboard, submit a healthy preset and confirm that the request and settlement both appear on Sepolia Etherscan. Then download the proof bundle and verify it independently:
 
 ```sh
 node scripts/verify-bundle.mjs downloaded-bundle.json
 ```
 
-This verifies the proof against the supplied key. Independently compare the key/setup and model identity against the deployment you trust, and check the job/chain/consumer context. Merely verifying a proof under a key supplied by its sender is insufficient to authenticate a model.
+The bundle's key must be independently matched to the pinned release; a valid proof under an untrusted key does not authenticate a model. Any transaction reward and all gas are paid in faucet test ETH, not real value.
+
+## Local development mode
+
+Use `docker compose up --build -d`. The local demonstration starts a private Ganache chain, local SQLite store and real Groth16 worker. The compose file binds to loopback and limits the container to 2 GB RAM and two CPUs. Keep both Docker volumes (`proofline-state`, `proofline-artifacts`) together. Never expose the local RPC publicly or reuse its development mnemonic on any public network.
+
+For a native local API, `DATA_DIR` selects an isolated SQLite directory. The API integration tests use their own temporary directory. Use a new data directory and new contract deployment for a new model or proof setup; never replace the verifier key under existing requests.
 
 ## Failure recovery
 
-The queue is durable in SQLite; the chain is durable in its own volume. On startup, interrupted proving/verifying records are reconciled with chain state. Pending work can be proved again because only an unexpired pending job can settle. Failed jobs can be refunded after expiry. If a settlement was mined before a process interruption, reconciliation preserves its settled status rather than paying again. Download bundles before retiring a development instance.
+Signed request transactions and signed settlements are persisted before broadcast. Startup checks transaction receipts, waits for the configured confirmation count, and rebroadcasts the same signed transaction after interruptions. Jobs are reconciled with on-chain state before retrying proof work. This is designed for one service process and does not replace independent monitoring, backups or a production incident plan.

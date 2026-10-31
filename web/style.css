@@ -771,6 +771,29 @@ pre {
   margin: 8px 0 0;
   color: #9a9277;
 }
+.sponsor-notice {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  background: #eef4f0;
+  border-color: #d5e5d9;
+  color: #3b6c4c;
+}
+.sponsor-notice strong {
+  font-size: 12px;
+  letter-spacing: 0.02em;
+}
+.sponsor-notice p {
+  color: #61766a;
+}
+.sponsor-notice a {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  color: #356b49;
+}
 .lab-stats {
   display: flex;
   gap: 50px;

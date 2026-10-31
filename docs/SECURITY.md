@@ -6,7 +6,7 @@ The intended guarantee is correct execution of the frozen tree for an input open
 
 The local setup creates fresh random phase-one and phase-two contributions and verifies the zkey transcript. They come from one machine. A malicious or compromised setup operator can undermine soundness. Independently audited setup contributions and provenance are required before treating proof acceptance as production trust.
 
-The proving operator sees private inputs and salts. They are persisted in a local SQLite database to permit crash recovery. This is privacy from chain observers, not end-to-end confidentiality from the worker. Downloaded bundles and public API job records omit features and salt. A bundle intentionally discloses the risk class and all public signals.
+The proving operator sees private inputs and salts. They are persisted in SQLite locally or in Proofline's separate hosted PostgreSQL database to permit crash recovery. Completed hosted history and old quota records are removed after seven days; signed requests that have not yet been registered remain until reconciled. This is privacy from chain observers, not end-to-end confidentiality from the worker. Downloaded bundles and public API job records omit features and salt. A bundle intentionally discloses the risk class and all public signals. Public transactions and commitments cannot be deleted from Sepolia.
 
 ## Attacker model
 
@@ -20,10 +20,10 @@ The risk label is an output, not a lending, medical, employment, or financial de
 
 - The coordinator is a trusted, centralized operator for availability, scheduling, input handling, and signing. This project is not a decentralized consensus network.
 - Demo accounts use a published development mnemonic and disposable local funds. They must never receive assets on a real chain.
-- External mode requires separate configured requester/worker keys and an operator token. All HTTP mutations use those operator accounts; this release is not a noncustodial browser-wallet dApp.
-- The public demo API has submission/queue limits; externally accessible operator instances require TLS, authentication, request body limits and upstream abuse controls. A shared bearer token provides operator access, not per-user tenancy.
-- A single API process owns one SQLite database and one EVM database. Multiple replicas against the same files are unsupported.
-- A shutdown between mining a request and persisting its private input can leave an orphan request. Inspect on-chain events and refund it after expiry; there is no claim of exactly-once API delivery.
+- External mode requires separate configured requester/worker keys and an operator token. The hosted public pilot sponsors submissions with those operator accounts; it is not a noncustodial browser-wallet dApp.
+- Public Sepolia mode uses signed browser-session ownership, IP/network and global daily quotas, a small fixed test reward, queue and request-rate limits, and pauses when either test wallet falls below its reserve. Telemetry and withdrawals remain operator-only. These controls limit abuse but are not a substitute for an audited anti-abuse system.
+- One API process owns each SQLite or PostgreSQL store and its EVM signing accounts. PostgreSQL advisory locking refuses a second signer process. Horizontal replicas are unsupported.
+- Signed request and settlement transactions are persisted before broadcast and reconciled on restart. A pending signed request can remain unresolved if the upstream RPC permanently loses it; inspect the public receipt and session state before manual recovery.
 - Replay protection concerns application context and one-use jobs. The protocol does not authenticate human ownership of input data or model-training provenance.
 - Gas and proof measurements are from the included small circuit and local chain; they are not an SLA.
 

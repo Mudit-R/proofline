@@ -3,11 +3,12 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import os from 'node:os';
 import { fork } from 'node:child_process';
-import { DatabaseSync } from 'node:sqlite';
 import express from 'express';
 import { ethers } from 'ethers';
 import { connectChain } from './chain.mjs';
 import { model, commitment, salt, validateFeatures } from './crypto.mjs';
+import { Store } from './store.mjs';
+import { SubmissionService } from './submissions.mjs';
 
 const mode = process.env.MODE || 'demo',
   host = process.env.HOST || '127.0.0.1';
@@ -15,22 +16,21 @@ if (mode !== 'demo' && mode !== 'external') throw new Error('MODE must be demo o
 if (mode === 'external' && !process.env.OPERATOR_TOKEN)
   throw new Error('External mode requires OPERATOR_TOKEN');
 const chain = await connectChain();
+const publicTry = process.env.PUBLIC_TRY === 'true';
+const publicReward = '0.000001';
+if (publicTry && mode === 'external' && chain.chainId !== '11155111')
+  throw new Error('Sponsored public access is restricted to Ethereum Sepolia');
+if (publicTry && !process.env.SESSION_SECRET)
+  throw new Error('PUBLIC_TRY requires a persistent SESSION_SECRET');
 const dataDir = process.env.DATA_DIR || '.local';
 fs.mkdirSync(dataDir, { recursive: true });
-const db = new DatabaseSync(path.join(dataDir, 'jobs.sqlite'));
-db.exec(
-  `PRAGMA journal_mode=WAL;CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY,record TEXT NOT NULL);`,
-);
-const jobs = db
-  .prepare('SELECT record FROM jobs')
-  .all()
-  .map((r) => JSON.parse(r.record));
-const save = (j) => {
-  j.updatedAt = new Date().toISOString();
-  db.prepare('INSERT OR REPLACE INTO jobs VALUES(?,?)').run(j.id, JSON.stringify(j));
-};
+const store = await Store.open(dataDir);
+const retentionDays = 7;
+await store.prune(new Date(Date.now() - retentionDays * 86400000).toISOString());
+const jobs = await store.jobs();
+const save = async (j) => store.saveJob(j);
 const publicJob = (j) => {
-  const { features, salt: _, ...record } = j;
+  const { features, salt: _, owner, rawSettlement, ...record } = j;
   return record;
 };
 for (const j of jobs) {
@@ -39,19 +39,38 @@ for (const j of jobs) {
     if (Number(state.status) === 2) {
       j.status = 'settled';
       j.risk = Number(state.risk);
+      if (j.settleTx) {
+        const receipt = await chain.provider.getTransactionReceipt(j.settleTx);
+        if (receipt) {
+          j.blockNumber = receipt.blockNumber;
+          j.gasUsed = receipt.gasUsed.toString();
+        }
+      }
+      delete j.rawSettlement;
     } else j.status = 'queued';
-    save(j);
+    await save(j);
   }
 }
 let active = false,
   child = null;
+let stopping = false;
 const listeners = new Set();
 const emit = () => {
   for (const res of listeners) res.write('data: ' + JSON.stringify({ type: 'update' }) + '\n\n');
 };
-const update = (j, patch) => {
+const submissions = new SubmissionService({ store, chain, jobs, emit });
+async function pruneOldData() {
+  const cutoff = new Date(Date.now() - retentionDays * 86400000).toISOString();
+  const removed = await store.prune(cutoff);
+  if (removed.length) {
+    const expired = new Set(removed);
+    for (let i = jobs.length - 1; i >= 0; i--) if (expired.has(jobs[i].id)) jobs.splice(i, 1);
+    emit();
+  }
+}
+const update = async (j, patch) => {
   Object.assign(j, patch);
-  save(j);
+  await save(j);
   emit();
 };
 const inputFor = (j) => ({
@@ -81,9 +100,14 @@ function runProver(input) {
       clearTimeout(timer);
       reject(error);
     });
+    let delivered = false;
+    child.once('message', () => {
+      delivered = true;
+    });
     child.once('exit', (code) => {
       clearTimeout(timer);
-      if (code !== 0) reject(new Error('Prover process failed'));
+      if (code !== 0 || !delivered)
+        reject(new Error('Prover process exited without a valid result'));
     });
     child.send(input);
   });
@@ -139,20 +163,37 @@ async function attacks(j, args) {
   return checks;
 }
 async function drain() {
-  if (active) return;
-  const j = jobs.find((j) => j.status === 'queued');
+  if (active || stopping) return;
+  const j = jobs.find((j) => j.status === 'queued' && (!j.retryAt || j.retryAt <= Date.now()));
   if (!j) return;
   active = true;
   try {
     const state = await chain.contract.jobs(j.id);
     const block = await chain.provider.getBlock('latest');
-    if (Number(state.status) === 3 || block.timestamp >= Number(state.deadline)) {
-      update(j, { status: 'expired' });
+    if (Number(state.status) === 2) {
+      await update(j, { status: 'settled', risk: Number(state.risk) });
       return;
     }
-    update(j, { status: 'proving', startedAt: new Date().toISOString() });
-    const result = await runProver(inputFor(j));
-    update(j, {
+    if (Number(state.status) === 3 || block.timestamp >= Number(state.deadline)) {
+      await update(j, { status: 'expired' });
+      return;
+    }
+    await update(j, { status: 'proving', startedAt: new Date().toISOString() });
+    const result = j.proof
+      ? {
+          proof: j.proof,
+          publicSignals: j.publicSignals,
+          proveMs: j.proveMs,
+          args: JSON.parse(
+            '[' +
+              (await (
+                await import('snarkjs')
+              ).groth16.exportSolidityCallData(j.proof, j.publicSignals)) +
+              ']',
+          ),
+        }
+      : await runProver(inputFor(j));
+    await update(j, {
       status: 'verifying',
       proof: result.proof,
       publicSignals: result.publicSignals,
@@ -166,15 +207,39 @@ async function drain() {
       ).length,
     });
     const checks = await attacks(j, result.args);
-    const tx = await chain.contract.connect(chain.worker).settle(j.id, ...result.args);
-    const receipt = await tx.wait();
+    let receipt = j.settleTx ? await chain.provider.getTransactionReceipt(j.settleTx) : null;
+    if (!receipt) {
+      if (!j.rawSettlement) {
+        const populated = await chain.worker.populateTransaction(
+          await chain.contract
+            .connect(chain.worker)
+            .settle.populateTransaction(j.id, ...result.args),
+        );
+        const rawSettlement = await chain.worker.signTransaction(populated);
+        await update(j, { rawSettlement, settleTx: ethers.keccak256(rawSettlement), checks });
+      }
+      let tx;
+      try {
+        tx = await chain.provider.broadcastTransaction(j.rawSettlement);
+      } catch (error) {
+        const existing = await chain.provider.getTransaction(j.settleTx);
+        if (!existing) throw error;
+        tx = existing;
+      }
+      receipt = await tx.wait(
+        Number(process.env.CONFIRMATIONS || 1),
+        Number(process.env.RECEIPT_TIMEOUT_MS || 20000),
+      );
+    }
+    if (!receipt || receipt.status !== 1)
+      throw new Error('Settlement did not confirm successfully');
     try {
       await chain.contract.connect(chain.worker).settle.staticCall(j.id, ...result.args);
       checks.push({ name: 'Duplicate settlement', rejected: false });
     } catch (error) {
       checks.push({ name: 'Duplicate settlement', rejected: error.code === 'CALL_EXCEPTION' });
     }
-    update(j, {
+    await update(j, {
       status: 'settled',
       settleTx: receipt.hash,
       blockNumber: receipt.blockNumber,
@@ -182,9 +247,18 @@ async function drain() {
       checks,
       settledAt: new Date().toISOString(),
     });
+    delete j.rawSettlement;
+    await save(j);
   } catch (error) {
-    update(j, {
-      status: 'failed',
+    if (stopping) return;
+    const transient = ['NETWORK_ERROR', 'TIMEOUT', 'SERVER_ERROR', 'UNKNOWN_ERROR'].includes(
+      error.code,
+    );
+    const attempts = (j.attempts || 0) + 1;
+    await update(j, {
+      status: transient && attempts < 5 ? 'queued' : 'failed',
+      attempts,
+      retryAt: Date.now() + Math.min(60000, 2000 * 2 ** attempts),
       error: String(error.shortMessage || error.message).slice(0, 300),
     });
   } finally {
@@ -195,6 +269,7 @@ async function drain() {
 }
 const app = express();
 app.disable('x-powered-by');
+if (process.env.TRUST_PROXY_HOPS) app.set('trust proxy', Number(process.env.TRUST_PROXY_HOPS));
 app.use(express.json({ limit: '8kb' }));
 app.get('/healthz', (req, res) => res.json({ ok: true }));
 app.use((req, res, next) => {
@@ -214,23 +289,52 @@ app.use((req, res, next) => {
         return res.sendStatus(403);
       }
     }
-    const token = process.env.OPERATOR_TOKEN;
-    if (token) {
-      const actual = Buffer.from(req.headers.authorization?.replace(/^Bearer /, '') || '');
-      const expected = Buffer.from(token);
-      if (actual.length !== expected.length || !crypto.timingSafeEqual(actual, expected))
-        return res.status(401).json({ error: 'An operator token is required' });
+    const token = process.env.OPERATOR_TOKEN,
+      provided = req.headers.authorization?.replace(/^Bearer /, '') || '';
+    const actual = Buffer.from(provided),
+      expected = Buffer.from(token || '');
+    req.operator =
+      !token || (actual.length === expected.length && crypto.timingSafeEqual(actual, expected));
+    if (!req.operator && !publicTry)
+      return res.status(401).json({ error: 'An operator token is required' });
+    if (!req.operator && provided) return res.status(401).json({ error: 'Invalid operator token' });
+    req.owner = 'operator';
+    if (!req.operator) {
+      const secret = process.env.SESSION_SECRET;
+      const sign = (s) => crypto.createHmac('sha256', secret).update(s).digest('hex');
+      const candidate = (req.headers.cookie || '')
+        .split(';')
+        .map((s) => s.trim())
+        .find((s) => s.startsWith('proofline_session='))
+        ?.slice(18);
+      let owner = candidate?.split('.')[0];
+      if (!owner || !/^[a-f0-9]{48}$/.test(owner) || candidate !== owner + '.' + sign(owner)) {
+        owner = crypto.randomBytes(24).toString('hex');
+        res.setHeader(
+          'Set-Cookie',
+          `proofline_session=${owner}.${sign(owner)}; HttpOnly; SameSite=Strict; Path=/; Max-Age=604800${req.secure ? '; Secure' : ''}`,
+        );
+      }
+      req.owner = owner;
+      req.quotaIp = sign(req.ip || req.socket.remoteAddress);
     }
   }
   next();
 });
 const limits = new Map();
 const rateLimit = (req, res, next) => {
-  const key = req.socket.remoteAddress;
+  const key = req.ip || req.socket.remoteAddress;
   let info = limits.get(key);
   if (!info || info.reset < Date.now()) {
     info = { count: 0, reset: Date.now() + 600000 };
     limits.set(key, info);
+  }
+  // Bound memory use if many distinct source addresses hit the public endpoint.
+  if (limits.size > 5000) {
+    for (const address of limits.keys()) {
+      limits.delete(address);
+      if (limits.size <= 4000) break;
+    }
   }
   if (++info.count > 20)
     return res.status(429).json({ error: 'Twenty submissions per ten minutes. Please wait.' });
@@ -246,6 +350,10 @@ const cpuTotals = () =>
   );
 let cpuSample = cpuTotals();
 app.get('/api/telemetry', (req, res) => {
+  if (!req.operator)
+    return res
+      .status(403)
+      .json({ error: 'Server telemetry is operator-only; use your own workload metrics' });
   const now = cpuTotals(),
     total = now.total - cpuSample.total,
     idle = now.idle - cpuSample.idle;
@@ -275,6 +383,18 @@ app.get('/api/telemetry', (req, res) => {
 app.get('/api/status', async (req, res) => {
   res.json({
     mode,
+    operator: req.operator,
+    publicTry,
+    reward: publicTry ? publicReward : process.env.REWARD_ETH || publicReward,
+    historyRetentionDays: publicTry ? retentionDays : null,
+    sponsoredLimits: publicTry
+      ? { perBrowserPerDay: 3, perNetworkPerDay: 10, globalPerDay: 20 }
+      : null,
+    explorer: chain.chainId === '11155111' ? 'https://sepolia.etherscan.io' : null,
+    networkName: chain.chainId === '11155111' ? 'Ethereum Sepolia' : 'Local development EVM',
+    pendingSubmissions: (await store.submissions()).filter(
+      (s) => s.state === 'signed' && (req.operator || s.owner === req.owner),
+    ).length,
     chainId: chain.chainId,
     contract: chain.address,
     requester: await chain.requester.getAddress(),
@@ -287,7 +407,16 @@ app.get('/api/status', async (req, res) => {
     queued: jobs.filter((j) => j.status === 'queued').length,
   });
 });
-app.get('/api/jobs', (req, res) => res.json(jobs.slice().reverse().map(publicJob)));
+const visibleJob = (req, j) => !!j && (req.operator || j.owner === req.owner);
+app.get('/api/jobs', (req, res) =>
+  res.json(
+    jobs
+      .filter((j) => visibleJob(req, j))
+      .slice(-200)
+      .reverse()
+      .map(publicJob),
+  ),
+);
 app.get('/api/transactions/:hash', async (req, res) => {
   if (!/^0x[0-9a-f]{64}$/i.test(req.params.hash))
     return res.status(400).json({ error: 'Invalid transaction hash' });
@@ -316,7 +445,7 @@ app.get('/api/transactions/:hash', async (req, res) => {
 });
 app.get('/api/jobs/:id/bundle', (req, res) => {
   const j = jobs.find((j) => j.id === req.params.id);
-  if (!j?.proof) return res.status(404).json({ error: 'No proof available' });
+  if (!visibleJob(req, j) || !j.proof) return res.status(404).json({ error: 'No proof available' });
   res.attachment(`proofline-job-${j.id}.json`).json({
     schema: 'proofline/v1',
     job: publicJob(j),
@@ -325,65 +454,69 @@ app.get('/api/jobs/:id/bundle', (req, res) => {
     manifest: JSON.parse(fs.readFileSync('artifacts/manifest.json')),
   });
 });
-let submitting = false;
 app.post('/api/jobs', rateLimit, async (req, res) => {
-  if (submitting)
-    return res.status(409).json({ error: 'Another request is being registered. Try again.' });
-  if (jobs.filter((j) => ['queued', 'proving', 'verifying'].includes(j.status)).length >= 6)
-    return res.status(429).json({ error: 'Proof queue is full' });
-  submitting = true;
   try {
-    const features = validateFeatures(req.body.features);
-    const ttl = req.body.ttl ?? 600;
+    if (publicTry) {
+      const reserve = ethers.parseEther('0.002');
+      const [requesterBalance, workerBalance] = await Promise.all([
+        chain.provider.getBalance(await chain.requester.getAddress()),
+        chain.provider.getBalance(await chain.worker.getAddress()),
+      ]);
+      if (requesterBalance < reserve || workerBalance < reserve)
+        return res
+          .status(503)
+          .json({ error: 'Sponsored Sepolia funds are low; requests are paused.' });
+    }
+    if (jobs.filter((j) => ['queued', 'proving', 'verifying'].includes(j.status)).length >= 6)
+      return res.status(429).json({ error: 'Proof queue is full' });
+    const features = validateFeatures(req.body.features),
+      ttl = req.body.ttl ?? 600;
     if (!Number.isInteger(ttl) || ttl < 30 || ttl > 3600)
       throw new Error('TTL must be an integer from 30 to 3600 seconds');
-    const secret = salt(),
-      hash = commitment(features, secret);
-    const tx = await chain.contract.request(hash, ttl, { value: ethers.parseEther('0.001') });
-    const receipt = await tx.wait();
-    const event = receipt.logs
-      .map((l) => {
-        try {
-          return chain.contract.interface.parseLog(l);
-        } catch {
-          return null;
-        }
-      })
-      .find((l) => l?.name === 'Requested');
-    const j = {
-      id: event.args.jobId.toString(),
-      name: typeof req.body.name === 'string' ? req.body.name.slice(0, 60) : 'Telemetry request',
+    const name =
+      typeof req.body.name === 'string' ? req.body.name.slice(0, 60) : 'Telemetry request';
+    const key = req.headers['idempotency-key'] || crypto.randomUUID();
+    if (typeof key !== 'string' || key.length > 100 || !/^[a-zA-Z0-9_-]+$/.test(key))
+      throw new Error('Invalid idempotency key');
+    const scopes = req.operator
+      ? []
+      : [
+          ['visitor:' + req.owner, 3],
+          ['ip:' + req.quotaIp, 10],
+          ['global', 20],
+        ];
+    const result = await submissions.submit({
+      owner: req.owner,
+      key,
       features,
-      salt: secret,
-      commitment: hash,
-      requester: await chain.requester.getAddress(),
-      worker: await chain.worker.getAddress(),
-      deadline: Number(event.args.deadline),
-      reward: '0.001',
-      requestTx: receipt.hash,
-      status: 'queued',
-      createdAt: new Date().toISOString(),
-    };
-    jobs.push(j);
-    save(j);
-    emit();
-    res.status(201).json(publicJob(j));
-    setTimeout(drain, 10);
+      ttl,
+      name,
+      reward: publicTry ? publicReward : process.env.REWARD_ETH || publicReward,
+      quotaScopes: scopes,
+    });
+    if (result.job) {
+      res.status(201).json(publicJob(result.job));
+      setTimeout(drain, 10);
+    } else
+      res.status(202).json({
+        pending: true,
+        submissionId: result.submission.id,
+        requestTx: result.submission.hash,
+        status: 'registering',
+      });
   } catch (error) {
-    res.status(400).json({ error: error.shortMessage || error.message });
-  } finally {
-    submitting = false;
+    res.status(error.status || 400).json({ error: error.shortMessage || error.message });
   }
 });
 app.post('/api/jobs/:id/refund', async (req, res) => {
   try {
     const j = jobs.find((j) => j.id === req.params.id);
-    if (!j) return res.sendStatus(404);
+    if (!visibleJob(req, j)) return res.sendStatus(404);
     if (['proving', 'verifying'].includes(j.status))
       return res.status(409).json({ error: 'Wait for the active prover to finish' });
     const tx = await chain.contract.refund(j.id);
     const receipt = await tx.wait();
-    update(j, { status: 'refunded', refundTx: receipt.hash });
+    await update(j, { status: 'refunded', refundTx: receipt.hash });
     res.json(publicJob(j));
   } catch (error) {
     res
@@ -392,6 +525,7 @@ app.post('/api/jobs/:id/refund', async (req, res) => {
   }
 });
 app.post('/api/withdraw', async (req, res) => {
+  if (!req.operator) return res.status(403).json({ error: 'Withdrawal is an operator action' });
   try {
     const tx = await chain.contract.connect(chain.worker).withdraw();
     const receipt = await tx.wait();
@@ -419,13 +553,32 @@ app.use((error, req, res, next) => {
 });
 const http = app.listen(Number(process.env.PORT || 15190), host, () => {
   console.log(`Proofline: http://${host}:${http.address().port} — ${mode} chain ${chain.chainId}`);
-  drain();
+  submissions
+    .recover()
+    .then(drain)
+    .catch((error) => console.error('Startup reconciliation:', error.message));
 });
+const recoveryTimer = setInterval(
+  () =>
+    submissions
+      .recover()
+      .then(drain)
+      .catch((error) => console.error('Reconciliation:', error.message)),
+  5000,
+);
+const retentionTimer = setInterval(
+  () => pruneOldData().catch((error) => console.error('History cleanup:', error.message)),
+  3600000,
+);
 async function shutdown() {
+  stopping = true;
+  clearInterval(recoveryTimer);
+  clearInterval(retentionTimer);
   child?.kill();
   for (const res of listeners) res.end();
-  http.close();
-  db.close();
+  await new Promise((resolve) => http.close(resolve));
+  while (active) await new Promise((resolve) => setTimeout(resolve, 25));
+  await store.close();
   await chain.close();
   process.exit(0);
 }

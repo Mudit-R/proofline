@@ -1,0 +1,31 @@
+{
+  "chainId": "11155111",
+  "address": "0xb196Da6761E94bd4D805b2102BcbFCb3fD29c278",
+  "verifier": "0x043F4361143443ba64615FFBAF017ccc212Bb982",
+  "verifierTx": "0xc69bbe00bf99e203061606c9e5fc41f1d9a4b6e2ed5af6c397bac700a6400ee1",
+  "consumerTx": "0x40f088ceaf46d770152d9c030029ebb02134a5495f899d43356b7abc7e4dc0bd",
+  "modelId": "3920830681056495893493525510390247391095822617781577148034049015435640303040",
+  "manifest": "{\n  \"setup\": \"single-machine development ceremony; requires independent ceremony for production trust\",\n  \"circuit\": \"6fd93a4ffebb916e797cdd96195f87568593fd310ed6c7dd114248cae53146f6\",\n  \"files\": {\n    \"inference.r1cs\": \"83cd68cc373a283e87296321df1a4879c11fc6bb64b283a03869f98d44c72875\",\n    \"inference.zkey\": \"e00a1f5fc62e50630a8b3b931def10f871db332a1f7ebb8e92843f78fd28f8a9\",\n    \"verification_key.json\": \"9af8ad26c8d5a6768a5660fb38ce0612f78b5db836937f45ecffe9770f015640\",\n    \"Groth16Verifier.sol\": \"c789233c4ce6f1f41e712d0543268e296823e85e40c720ed140725d056e06b67\"\n  }\n}\n",
+  "testFlow": {
+    "chainId": "11155111",
+    "requestTransaction": "0x122f90e202e22de4255a8ccf941f43b87e67d55a27b90f7ce220bca7eca1f85d",
+    "requestBlock": 12036762,
+    "requestConfirmationsAtCheck": 6,
+    "settlementTransaction": "0xc5671efe149b75087250e8cb63bcc6b17d9d612cc00ad7a59ff8ed2287a64190",
+    "settlementBlock": 12036764,
+    "settlementConfirmationsAtCheck": 4,
+    "settlementStatus": 1,
+    "settlementGasUsed": "402578",
+    "risk": 0,
+    "checks": [
+      "tampered prediction rejected",
+      "wrong input commitment rejected",
+      "cross-chain replay rejected",
+      "wrong consumer rejected",
+      "wrong job ID rejected",
+      "model substitution rejected",
+      "forged proof rejected",
+      "duplicate settlement rejected"
+    ]
+  }
+}

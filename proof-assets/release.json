@@ -1,0 +1,11 @@
+{
+  "version": "sepolia-v1",
+  "files": {
+    "inference.zkey": "e00a1f5fc62e50630a8b3b931def10f871db332a1f7ebb8e92843f78fd28f8a9",
+    "inference.r1cs": "83cd68cc373a283e87296321df1a4879c11fc6bb64b283a03869f98d44c72875",
+    "verification_key.json": "9af8ad26c8d5a6768a5660fb38ce0612f78b5db836937f45ecffe9770f015640",
+    "Groth16Verifier.sol": "c789233c4ce6f1f41e712d0543268e296823e85e40c720ed140725d056e06b67",
+    "manifest.json": "e860843af959eb8448ab8c0f2e52639eb5ebf5f9ad5c7faf6378a52bb338d018",
+    "inference_js/inference.wasm": "b59b1d734971f838aad5e22ac6d2a6201980eaa0ddf8c2278f69a4f83446fef1"
+  }
+}

@@ -6,6 +6,22 @@ jobs:
   protocol:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: proofline
+          POSTGRES_PASSWORD: proofline-ci-only
+          POSTGRES_DB: proofline_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U proofline -d proofline_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      PROOFLINE_TEST_DATABASE_URL: postgresql://proofline:proofline-ci-only@localhost:5432/proofline_test
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

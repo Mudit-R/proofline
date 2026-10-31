@@ -38,6 +38,7 @@ function App() {
     [name, setName] = useState('Telemetry check'),
     [error, setError] = useState(''),
     [busy, setBusy] = useState(false),
+    [submissionKey, setSubmissionKey] = useState(() => crypto.randomUUID()),
     [token, setToken] = useState(sessionStorage.getItem('proofline-token') || ''),
     [auth, setAuth] = useState(false),
     [transaction, setTransaction] = useState(null),
@@ -75,6 +76,7 @@ function App() {
     const timer = setInterval(refresh, 3000);
     return () => clearInterval(timer);
   }, [token]);
+  useEffect(() => setSubmissionKey(crypto.randomUUID()), [features, name]);
   useEffect(() => {
     if (!modal && !selected && !auth && !transaction) return;
     const previous = document.activeElement;
@@ -111,9 +113,14 @@ function App() {
     e.preventDefault();
     setBusy(true);
     try {
-      const j = await api('/jobs', { method: 'POST', body: JSON.stringify({ features, name }) });
+      const j = await api('/jobs', {
+        method: 'POST',
+        headers: { 'Idempotency-Key': submissionKey },
+        body: JSON.stringify({ features, name }),
+      });
       setModal(false);
-      setSelected(j);
+      setSelected(j.pending ? null : j);
+      setSubmissionKey(crypto.randomUUID());
       await refresh();
     } catch (e) {
       setError(e.message);
@@ -255,7 +262,7 @@ function App() {
           <div className="network-box">
             <span className="live-dot" />
             <span>
-              {status?.mode === 'external' ? 'External EVM' : 'Local EVM'}
+              {status?.networkName || 'Connecting'}
               <small>Chain {status?.chainId || 'connecting…'}</small>
             </span>
             <ShieldCheck size={16} />
@@ -286,7 +293,7 @@ function App() {
           <div className="header-right">
             <span className="network-label">
               <span className="live-dot" />
-              {status ? 'Network connected' : 'Connecting'}
+              {status ? status.networkName : 'Connecting'}
             </span>
             <button className="icon-button" aria-label="Refresh workspace" onClick={refresh}>
               <RefreshCw size={16} />
@@ -301,6 +308,36 @@ function App() {
               <button onClick={() => setError('')} aria-label="Dismiss error">
                 <X size={16} />
               </button>
+            </div>
+          )}
+          {status?.pendingSubmissions > 0 && (
+            <div className="notice" role="status">
+              Your signed request is waiting for testnet confirmations. It is saved durably and will
+              appear below after registration.
+            </div>
+          )}
+          {status?.publicTry && (
+            <div className="notice sponsor-notice" role="status">
+              <div>
+                <strong>Public Sepolia pilot</strong>
+                <p>
+                  Requests use faucet-funded test ETH. No real funds are involved. Limits:{' '}
+                  {status.sponsoredLimits?.perBrowserPerDay ?? 3} per browser,{' '}
+                  {status.sponsoredLimits?.perNetworkPerDay ?? 10} per shared network, and{' '}
+                  {status.sponsoredLimits?.globalPerDay ?? 20} total each day. History is removed
+                  after {status.historyRetentionDays ?? 7} days; public chain records remain
+                  visible.
+                </p>
+              </div>
+              {status.explorer && (
+                <a
+                  href={`${status.explorer}/address/${status.contract}`}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  View contract <ExternalLink size={13} />
+                </a>
+              )}
             </div>
           )}
           <div className="page-heading">
@@ -363,19 +400,23 @@ function App() {
                     {status?.workerCredit || '0.0'}
                     <small>ETH</small>
                   </strong>
-                  <button
-                    className="inline-button"
-                    onClick={async () => {
-                      try {
-                        await api('/withdraw', { method: 'POST', body: '{}' });
-                        refresh();
-                      } catch (e) {
-                        setError(e.message);
-                      }
-                    }}
-                  >
-                    Withdraw settled rewards ↗
-                  </button>
+                  {status?.operator ? (
+                    <button
+                      className="inline-button"
+                      onClick={async () => {
+                        try {
+                          await api('/withdraw', { method: 'POST', body: '{}' });
+                          refresh();
+                        } catch (e) {
+                          setError(e.message);
+                        }
+                      }}
+                    >
+                      Withdraw settled rewards ↗
+                    </button>
+                  ) : (
+                    <p>Sponsored testnet worker balance</p>
+                  )}
                 </div>
               </section>
               {tab === 'Overview' && (
@@ -569,7 +610,9 @@ function App() {
             <span>
               {status?.mode === 'demo'
                 ? 'Local demo · Disposable test ETH · Development setup'
-                : 'Operator-managed EVM deployment'}
+                : status?.publicTry
+                  ? 'Public testnet pilot · Sepolia · Sponsored requests'
+                  : 'Operator-managed EVM deployment'}
             </span>
           </footer>
         </main>
@@ -598,6 +641,12 @@ function App() {
               Provide telemetry. The worker proves its inference before the contract releases the
               reward.
             </p>
+            {status?.publicTry && (
+              <p className="fine">
+                This public pilot uses testnet ETH and is rate-limited. The service operator can see
+                submitted telemetry.
+              </p>
+            )}
             <form onSubmit={submit}>
               <label className="field-label">
                 Request name
@@ -609,20 +658,22 @@ function App() {
                 />
               </label>
               <div className="presets">
-                <button
-                  type="button"
-                  onClick={async () => {
-                    try {
-                      const t = await api('/telemetry');
-                      setFeatures(t.features);
-                      setName('Live host telemetry');
-                    } catch (e) {
-                      setError(e.message);
-                    }
-                  }}
-                >
-                  Use server telemetry ↗
-                </button>
+                {status?.operator && (
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      try {
+                        const t = await api('/telemetry');
+                        setFeatures(t.features);
+                        setName('Live host telemetry');
+                      } catch (e) {
+                        setError(e.message);
+                      }
+                    }}
+                  >
+                    Use server telemetry ↗
+                  </button>
+                )}
                 {Object.entries(profiles).map(([p, f]) => (
                   <button
                     key={p}
@@ -659,7 +710,7 @@ function App() {
                   Model <strong>Sentinel v1</strong>
                 </span>
                 <span>
-                  Escrow reward <strong>0.001 test ETH</strong>
+                  Escrow reward <strong>{status?.reward || '0.000001'} test ETH</strong>
                 </span>
                 <span>
                   Deadline <strong>10 minutes</strong>
@@ -819,6 +870,16 @@ function App() {
             <pre style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>
               {JSON.stringify(transaction, null, 2)}
             </pre>
+            {status?.explorer && (
+              <a
+                className="button full"
+                target="_blank"
+                rel="noreferrer"
+                href={status.explorer + '/tx/' + transaction.hash}
+              >
+                Open public explorer <ExternalLink size={14} />
+              </a>
+            )}
             <button className="button full" onClick={() => copy(transaction.hash)}>
               Copy transaction hash
             </button>

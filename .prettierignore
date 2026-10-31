@@ -2,6 +2,7 @@ node_modules/
 dist/
 .local/
 artifacts/
+proof-assets/
 package-lock.json
 docs/evidence/
 LICENSE

@@ -4,6 +4,27 @@ import { execFileSync } from 'node:child_process';
 import * as snarkjs from 'snarkjs';
 fs.mkdirSync('artifacts', { recursive: true });
 fs.mkdirSync('contracts', { recursive: true });
+if (fs.existsSync('proof-assets/release.json') && !process.argv.includes('--new-ceremony')) {
+  const release = JSON.parse(fs.readFileSync('proof-assets/release.json'));
+  const expected = JSON.parse(fs.readFileSync('proof-assets/manifest.json'));
+  const circuit = crypto
+    .createHash('sha256')
+    .update(fs.readFileSync('circuits/inference.circom'))
+    .digest('hex');
+  if (circuit !== expected.circuit)
+    throw new Error(
+      'Circuit differs from pinned Sepolia release. A changed model requires a new ceremony and contract deployment.',
+    );
+  for (const [file, digest] of Object.entries(release.files)) {
+    const bytes = fs.readFileSync('proof-assets/' + file);
+    if (crypto.createHash('sha256').update(bytes).digest('hex') !== digest)
+      throw new Error('Proof artifact checksum failed: ' + file);
+    fs.mkdirSync('artifacts/' + file.split('/').slice(0, -1).join('/'), { recursive: true });
+    fs.writeFileSync('artifacts/' + file, bytes);
+  }
+  console.log('Loaded checksum-verified, pinned Sepolia proving artifacts.');
+  process.exit(0);
+}
 const run = (script, args) =>
   execFileSync(process.execPath, [script, ...args], { stdio: 'inherit', timeout: 600000 });
 const compileArgs = ['circuits/inference.circom', '--r1cs', '--wasm', '--sym', '-o', 'artifacts'];
