@@ -1,0 +1,18 @@
+services:
+  proofline:
+    build: .
+    init: true
+    ports:
+      - '127.0.0.1:15190:15190'
+    environment:
+      MODE: demo
+      HOST: 0.0.0.0
+    volumes:
+      - proofline-state:/app/.local
+      - proofline-artifacts:/app/artifacts
+    mem_limit: 2g
+    cpus: 2
+    restart: unless-stopped
+volumes:
+  proofline-state:
+  proofline-artifacts:

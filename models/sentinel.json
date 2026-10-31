@@ -1,0 +1,73 @@
+{
+  "name": "Sentinel telemetry tree",
+  "version": "1.0.0",
+  "features": [
+    {
+      "key": "cpu",
+      "label": "CPU utilization",
+      "unit": "%"
+    },
+    {
+      "key": "memory",
+      "label": "Memory utilization",
+      "unit": "%"
+    },
+    {
+      "key": "errors",
+      "label": "Retry / error pressure",
+      "unit": "%"
+    },
+    {
+      "key": "queue",
+      "label": "Queue utilization",
+      "unit": "%"
+    }
+  ],
+  "tree": {
+    "feature": 2,
+    "threshold": 55,
+    "left": {
+      "feature": 1,
+      "threshold": 85,
+      "left": {
+        "feature": 0,
+        "threshold": 85,
+        "left": {
+          "value": 0
+        },
+        "right": {
+          "value": 0
+        }
+      },
+      "right": {
+        "value": 1
+      }
+    },
+    "right": {
+      "feature": 2,
+      "threshold": 60,
+      "left": {
+        "feature": 1,
+        "threshold": 75,
+        "left": {
+          "value": 1
+        },
+        "right": {
+          "value": 1
+        }
+      },
+      "right": {
+        "value": 1
+      }
+    }
+  },
+  "training": {
+    "source": "Deterministic synthetic operational telemetry; not production training data",
+    "seed": 19371,
+    "trainRows": 2000,
+    "testRows": 400,
+    "testAccuracy": 0.9725,
+    "split": "First 2000 generated rows for training, next 400 held out"
+  },
+  "id": "3920830681056495893493525510390247391095822617781577148034049015435640303040"
+}
