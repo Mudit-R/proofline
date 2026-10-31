@@ -3,7 +3,7 @@
 ## Executed
 
 - Generated a real BN254 Groth16 proving/verification setup using snarkjs and verified the zkey transcript. The circuit compiled to 787 non-linear and 1,155 linear constraints, with three public outputs and six public inputs.
-- Ran the protocol and authenticated API suite on Node 24 / Windows: **36 passed, 1 PostgreSQL integration test skipped** because `TEST_DATABASE_URL` was not configured. The suite creates real proofs, compiles and deploys the generated Solidity verifier, performs actual local EVM settlement, and covers account signup/login/logout plus account-to-account history isolation. Invalid EVM checks require a `CALL_EXCEPTION`; unrelated network failures are not treated as successful attack rejection.
+- Ran the protocol and authenticated API suite on Node 24 / Windows: **37 passed, 1 PostgreSQL integration test skipped** because `TEST_DATABASE_URL` was not configured. The suite creates real proofs, compiles and deploys the generated Solidity verifier, performs actual local EVM settlement, and covers account signup/login/logout, account-to-account history isolation, and PostgreSQL signer handoff. Invalid EVM checks require a `CALL_EXCEPTION`; unrelated network failures are not treated as successful attack rejection.
 - Verified healthy and elevated-risk witnesses. Out-of-range inputs and incorrect model identity fail witness constraint checking.
 - Verified the exported sample proof independently through `scripts/verify-bundle.mjs`. Its verification key is included for reproduction, not offered as a trusted production key.
 - Built the production React bundle with Vite.
@@ -20,6 +20,6 @@ The on-screen attack report uses EVM static calls for invalid submissions. A sta
 
 ## Scope
 
-This validates the supplied model/circuit, the deployed Sepolia bytecode identity, PostgreSQL persistence and one real Sepolia request/settlement. The public Render service still needs to be deployed and verified. It does not establish multi-party setup security, a smart-contract audit, real-value safety, realistic anomaly-detection accuracy, distributed consensus, or Ritual integration. The model's held-out score is from a deterministic synthetic dataset.
+This validates the supplied model/circuit, the deployed Sepolia bytecode identity, PostgreSQL persistence and one real Sepolia request/settlement. The account-enabled Render rollout is being rechecked after a single-signer handoff failure. It does not establish multi-party setup security, a smart-contract audit, real-value safety, realistic anomaly-detection accuracy, distributed consensus, or Ritual integration. The model's held-out score is from a deterministic synthetic dataset.
 
 The development ceremony and local chain are deliberately reproducible tooling paths; development account keys must not be used on public networks. No hosted proving service or mock proof is substituted when proving fails.

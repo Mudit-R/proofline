@@ -9,19 +9,6 @@ export class PostgresStore {
       connectionTimeoutMillis: 10000,
       idleTimeoutMillis: 30000,
     });
-    store.lease = await store.pool.connect();
-    const locked = await store.lease.query(
-      "SELECT pg_try_advisory_lock(hashtext('proofline-single-signer')) AS acquired",
-    );
-    if (!locked.rows[0].acquired) {
-      store.lease.release();
-      await store.pool.end();
-      throw new Error('Another Proofline signer already owns this database');
-    }
-    store.lease.on('error', () => {
-      console.error('Signer database lease lost; exiting to prevent conflicting writers');
-      process.exit(1);
-    });
     await store.pool.query(`CREATE SCHEMA IF NOT EXISTS proofline;
       REVOKE ALL ON SCHEMA proofline FROM PUBLIC;
       CREATE TABLE IF NOT EXISTS proofline.jobs(id TEXT PRIMARY KEY,record JSONB NOT NULL,created_at TIMESTAMPTZ NOT NULL DEFAULT now());
@@ -30,7 +17,51 @@ export class PostgresStore {
       CREATE TABLE IF NOT EXISTS proofline.users(id TEXT PRIMARY KEY,email TEXT NOT NULL UNIQUE,password_salt TEXT NOT NULL,password_hash TEXT NOT NULL,created_at TIMESTAMPTZ NOT NULL DEFAULT now());
       CREATE TABLE IF NOT EXISTS proofline.sessions(token_hash TEXT PRIMARY KEY,user_id TEXT NOT NULL REFERENCES proofline.users(id) ON DELETE CASCADE,created_at TIMESTAMPTZ NOT NULL DEFAULT now(),expires_at TIMESTAMPTZ NOT NULL);
       CREATE INDEX IF NOT EXISTS proofline_sessions_expiry ON proofline.sessions(expires_at);`);
+    store.isSigner = false;
+    store.signerReady = false;
+    await store.tryAcquireLease();
     return store;
+  }
+  async tryAcquireLease() {
+    if (this.lease) return true;
+    const lease = await this.pool.connect();
+    try {
+      const locked = await lease.query(
+        "SELECT pg_try_advisory_lock(hashtext('proofline-single-signer')) AS acquired",
+      );
+      if (!locked.rows[0].acquired) {
+        lease.release();
+        this.isSigner = false;
+        return false;
+      }
+      this.lease = lease;
+      this.isSigner = true;
+      lease.on('error', () => {
+        console.error('Signer database lease lost; exiting to prevent conflicting writers');
+        process.exit(1);
+      });
+      return true;
+    } catch (error) {
+      lease.release(error);
+      throw error;
+    }
+  }
+  async releaseLease() {
+    if (!this.lease) {
+      this.isSigner = false;
+      return;
+    }
+    const lease = this.lease;
+    this.lease = null;
+    this.isSigner = false;
+    this.signerReady = false;
+    try {
+      await lease.query("SELECT pg_advisory_unlock(hashtext('proofline-single-signer'))");
+      lease.release();
+    } catch (error) {
+      lease.release(error);
+      throw error;
+    }
   }
   async jobs() {
     return (
@@ -160,7 +191,7 @@ export class PostgresStore {
     }
   }
   async close() {
-    this.lease.release();
+    await this.releaseLease();
     await this.pool.end();
   }
 }

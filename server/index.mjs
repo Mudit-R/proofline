@@ -34,33 +34,42 @@ if (publicTry && !process.env.SESSION_SECRET)
 const dataDir = process.env.DATA_DIR || '.local';
 fs.mkdirSync(dataDir, { recursive: true });
 const store = await Store.open(dataDir);
-await store.pruneSessions(new Date().toISOString());
 const retentionDays = 7;
-await store.prune(new Date(Date.now() - retentionDays * 86400000).toISOString());
 const jobs = await store.jobs();
 const save = async (j) => store.saveJob(j);
 const publicJob = (j) => {
   const { features, salt: _, owner, rawSettlement, ...record } = j;
   return record;
 };
-for (const j of jobs) {
-  if (['proving', 'verifying'].includes(j.status)) {
-    const state = await chain.contract.jobs(j.id);
-    if (Number(state.status) === 2) {
-      j.status = 'settled';
-      j.risk = Number(state.risk);
-      if (j.settleTx) {
-        const receipt = await chain.provider.getTransactionReceipt(j.settleTx);
-        if (receipt) {
-          j.blockNumber = receipt.blockNumber;
-          j.gasUsed = receipt.gasUsed.toString();
+async function reconcileJobs() {
+  for (const j of jobs) {
+    if (['proving', 'verifying'].includes(j.status)) {
+      const state = await chain.contract.jobs(j.id);
+      if (Number(state.status) === 2) {
+        j.status = 'settled';
+        j.risk = Number(state.risk);
+        if (j.settleTx) {
+          const receipt = await chain.provider.getTransactionReceipt(j.settleTx);
+          if (receipt) {
+            j.blockNumber = receipt.blockNumber;
+            j.gasUsed = receipt.gasUsed.toString();
+          }
         }
-      }
-      delete j.rawSettlement;
-    } else j.status = 'queued';
-    await save(j);
+        delete j.rawSettlement;
+      } else j.status = 'queued';
+      await save(j);
+    }
   }
 }
+async function initializeSignerState() {
+  if (!store.isSigner) return;
+  await store.pruneSessions(new Date().toISOString());
+  await store.prune(new Date(Date.now() - retentionDays * 86400000).toISOString());
+  jobs.splice(0, jobs.length, ...(await store.jobs()));
+  await reconcileJobs();
+  store.signerReady = true;
+}
+await initializeSignerState();
 let active = false,
   child = null;
 let stopping = false;
@@ -70,6 +79,7 @@ const emit = () => {
 };
 const submissions = new SubmissionService({ store, chain, jobs, emit });
 async function pruneOldData() {
+  if (!store.signerReady) return;
   const cutoff = new Date(Date.now() - retentionDays * 86400000).toISOString();
   const removed = await store.prune(cutoff);
   if (removed.length) {
@@ -173,7 +183,7 @@ async function attacks(j, args) {
   return checks;
 }
 async function drain() {
-  if (active || stopping) return;
+  if (!store.signerReady || active || stopping) return;
   const j = jobs.find((j) => j.status === 'queued' && (!j.retryAt || j.retryAt <= Date.now()));
   if (!j) return;
   active = true;
@@ -281,7 +291,7 @@ const app = express();
 app.disable('x-powered-by');
 if (process.env.TRUST_PROXY_HOPS) app.set('trust proxy', Number(process.env.TRUST_PROXY_HOPS));
 app.use(express.json({ limit: '8kb' }));
-app.get('/healthz', (req, res) => res.json({ ok: true }));
+app.get('/healthz', (req, res) => res.json({ ok: true, signerReady: store.signerReady }));
 app.use(async (req, res, next) => {
   res.set({
     'X-Content-Type-Options': 'nosniff',
@@ -324,6 +334,8 @@ app.use(async (req, res, next) => {
       (req.method === 'GET' && req.path === '/api/auth/me') ||
       (req.method === 'POST' &&
         ['/api/auth/register', '/api/auth/login', '/api/auth/logout'].includes(req.path));
+    if (!store.signerReady && req.method !== 'GET' && !authRoute)
+      return res.status(503).json({ error: 'Proofline is handing off its worker. Retry shortly.' });
     if (!req.operator && !req.account && !publicTry && !authRoute)
       return res.status(401).json({ error: 'Sign in to access your workspace' });
     if (!req.operator && provided && !validOperator && !authRoute)
@@ -516,9 +528,11 @@ app.get('/api/telemetry', (req, res) => {
   });
 });
 app.get('/api/status', async (req, res) => {
+  const currentJobs = store.signerReady ? jobs : await store.jobs();
   res.json({
     mode,
     operator: req.operator,
+    signerReady: store.signerReady,
     publicTry,
     reward: publicTry ? publicReward : process.env.REWARD_ETH || publicReward,
     historyRetentionDays: publicTry ? retentionDays : null,
@@ -539,19 +553,20 @@ app.get('/api/status', async (req, res) => {
     workerCredit: ethers.formatEther(await chain.contract.credits(await chain.worker.getAddress())),
     block: await chain.provider.getBlockNumber(),
     active,
-    queued: jobs.filter((j) => j.status === 'queued').length,
+    queued: currentJobs.filter((j) => j.status === 'queued').length,
   });
 });
 const visibleJob = (req, j) => !!j && (req.operator || j.owner === req.owner);
-app.get('/api/jobs', (req, res) =>
+app.get('/api/jobs', async (req, res) => {
+  const currentJobs = await store.jobs();
   res.json(
-    jobs
+    currentJobs
       .filter((j) => visibleJob(req, j))
       .slice(-200)
       .reverse()
       .map(publicJob),
-  ),
-);
+  );
+});
 app.get('/api/transactions/:hash', async (req, res) => {
   if (!/^0x[0-9a-f]{64}$/i.test(req.params.hash))
     return res.status(400).json({ error: 'Invalid transaction hash' });
@@ -578,8 +593,8 @@ app.get('/api/transactions/:hash', async (req, res) => {
     }),
   });
 });
-app.get('/api/jobs/:id/bundle', (req, res) => {
-  const j = jobs.find((j) => j.id === req.params.id);
+app.get('/api/jobs/:id/bundle', async (req, res) => {
+  const j = (await store.jobs()).find((j) => j.id === req.params.id);
   if (!visibleJob(req, j) || !j.proof) return res.status(404).json({ error: 'No proof available' });
   res.attachment(`proofline-job-${j.id}.json`).json({
     schema: 'proofline/v1',
@@ -688,20 +703,43 @@ app.use((error, req, res, next) => {
   res.status(500).json({ error: 'Internal operation failed; inspect operator logs' });
 });
 const http = app.listen(Number(process.env.PORT || 15190), host, () => {
-  console.log(`Proofline: http://${host}:${http.address().port} — ${mode} chain ${chain.chainId}`);
-  submissions
-    .recover()
-    .then(drain)
-    .catch((error) => console.error('Startup reconciliation:', error.message));
-});
-const recoveryTimer = setInterval(
-  () =>
+  console.log(
+    `Proofline: http://${host}:${http.address().port} — ${mode} chain ${chain.chainId} — ${store.signerReady ? 'signer ready' : 'standby'}`,
+  );
+  if (store.signerReady)
     submissions
       .recover()
       .then(drain)
-      .catch((error) => console.error('Reconciliation:', error.message)),
-  5000,
-);
+      .catch((error) => console.error('Startup reconciliation:', error.message));
+});
+const recoveryTimer = setInterval(() => {
+  if (!store.signerReady) return;
+  submissions
+    .recover()
+    .then(drain)
+    .catch((error) => console.error('Reconciliation:', error.message));
+}, 5000);
+let acquiringLease = false;
+const leaseTimer = setInterval(async () => {
+  if (store.isSigner || stopping || acquiringLease || typeof store.tryAcquireLease !== 'function')
+    return;
+  acquiringLease = true;
+  try {
+    if (await store.tryAcquireLease()) {
+      await initializeSignerState();
+      await submissions.recover();
+      await drain();
+      console.log('Proofline acquired the signer lease after standby handoff.');
+    }
+  } catch (error) {
+    console.error('Signer handoff:', error.message);
+    await store
+      .releaseLease()
+      .catch((releaseError) => console.error('Signer lease release:', releaseError.message));
+  } finally {
+    acquiringLease = false;
+  }
+}, 2000);
 const retentionTimer = setInterval(
   () => pruneOldData().catch((error) => console.error('History cleanup:', error.message)),
   3600000,
@@ -709,6 +747,7 @@ const retentionTimer = setInterval(
 async function shutdown() {
   stopping = true;
   clearInterval(recoveryTimer);
+  clearInterval(leaseTimer);
   clearInterval(retentionTimer);
   child?.kill();
   for (const res of listeners) res.end();

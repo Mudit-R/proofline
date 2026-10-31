@@ -92,7 +92,7 @@ Each model version currently has its own immutable verifier and consumer deploym
 
 ## Evidence and tests
 
-The **37-test** protocol and API suite covers genuine proofs, invalid feature ranges, model substitution, changed outputs and commitments, wrong domains and requesters, front-running, malformed curve points, duplicate settlement, expiry, refunds, withdrawals, account signup/login/logout, per-account job isolation, guest-session isolation, retention, sponsored limits and input privacy. The PostgreSQL integration test runs when `TEST_DATABASE_URL` is configured; it was skipped in the latest local run. See [executed validation](docs/VALIDATION.md). The checked-in [sample proof bundle](docs/evidence/sample-proof.json) includes the verification key and measured local settlement data. Reproduce it with:
+The **38-test** protocol and API suite covers genuine proofs, invalid feature ranges, model substitution, changed outputs and commitments, wrong domains and requesters, front-running, malformed curve points, duplicate settlement, expiry, refunds, withdrawals, account signup/login/logout, per-account job isolation, PostgreSQL signer handoff, guest-session isolation, retention, sponsored limits and input privacy. The PostgreSQL integration test runs when `TEST_DATABASE_URL` is configured; it was skipped in the latest local run. See [executed validation](docs/VALIDATION.md). The checked-in [sample proof bundle](docs/evidence/sample-proof.json) includes the verification key and measured local settlement data. Reproduce it with:
 
 ```sh
 npm run setup

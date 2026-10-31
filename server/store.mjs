@@ -12,6 +12,8 @@ export class Store {
   }
   constructor(directory) {
     fs.mkdirSync(directory, { recursive: true });
+    this.isSigner = true;
+    this.signerReady = false;
     this.db = new DatabaseSync(path.join(directory, 'jobs.sqlite'));
     this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000;
       CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY,record TEXT NOT NULL);
