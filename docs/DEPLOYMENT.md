@@ -14,6 +14,10 @@ External mode uses the same real verifier and settlement flow against a separate
 
 The initial implementation is validated on the bundled Ganache chain. Public-testnet deployment, RPC failure recovery, user wallets, real-value custody and Ritual's native execution interface have not been validated. Do not claim those integrations from a successful local demo. A public testnet rollout requires network selection, test funds, key provisioning, deployment receipts and additional integration tests.
 
+After provisioning Ethereum Sepolia test funds and the environment above, `node scripts/deploy.mjs --testnet` explicitly deploys the real verifier and consumer and prints their public addresses. Normal server startup never auto-deploys on an external network. The helper rejects mainnet chain IDs. This helper has not been exercised against a public testnet in this release.
+
+`DATA_DIR` can select a separate state directory for an isolated instance. The automated API tests use this to avoid modifying the interactive demonstration.
+
 ## Independent proof verification
 
 Download a bundle from a settled request. With dependencies installed:

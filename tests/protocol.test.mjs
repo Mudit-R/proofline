@@ -52,9 +52,13 @@ test(
         assert.equal(result.publicSignals[1], hash);
         assert.equal(result.publicSignals.length, 9);
       });
-      const rejects = async (name, fn) => {
+      const rejects = async (name, fn, evm = true) => {
         await t.test(name, async () => {
-          await assert.rejects(fn);
+          await assert.rejects(fn, (error) =>
+            evm
+              ? error.code === 'CALL_EXCEPTION'
+              : /Assert Failed|Error in template|constraint/i.test(error.message),
+          );
           checks.push({ name, rejected: true });
         });
       };
@@ -114,11 +118,15 @@ test(
         assert.equal(await contract.credits(ra), 1000n);
         assert.equal((await contract.jobs(2)).status, 3n);
       });
-      await rejects('out-of-range witness fails circuit constraints', () =>
-        proof({ ...input, features: [101, 96, 12, 65] }),
+      await rejects(
+        'out-of-range witness fails circuit constraints',
+        () => proof({ ...input, features: [101, 96, 12, 65] }),
+        false,
       );
-      await rejects('model substitution fails witness generation', () =>
-        proof({ ...input, modelId: '1' }),
+      await rejects(
+        'model substitution fails witness generation',
+        () => proof({ ...input, modelId: '1' }),
+        false,
       );
       await t.test('healthy classification has a real proof too', async () => {
         const r = await proof({ ...input, features: [35, 42, 4, 20] });

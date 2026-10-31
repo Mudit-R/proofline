@@ -15,8 +15,9 @@ if (mode !== 'demo' && mode !== 'external') throw new Error('MODE must be demo o
 if (mode === 'external' && !process.env.OPERATOR_TOKEN)
   throw new Error('External mode requires OPERATOR_TOKEN');
 const chain = await connectChain();
-fs.mkdirSync('.local', { recursive: true });
-const db = new DatabaseSync('.local/jobs.sqlite');
+const dataDir = process.env.DATA_DIR || '.local';
+fs.mkdirSync(dataDir, { recursive: true });
+const db = new DatabaseSync(path.join(dataDir, 'jobs.sqlite'));
 db.exec(
   `PRAGMA journal_mode=WAL;CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY,record TEXT NOT NULL);`,
 );
@@ -93,8 +94,13 @@ async function attacks(j, args) {
     try {
       await fn();
       checks.push({ name, rejected: false });
-    } catch {
-      checks.push({ name, rejected: true });
+    } catch (error) {
+      checks.push({
+        name,
+        rejected: error.code === 'CALL_EXCEPTION',
+        reason:
+          error.code === 'CALL_EXCEPTION' ? 'EVM reverted' : 'Infrastructure error: ' + error.code,
+      });
     }
   };
   const mutate = (index, value) => [
@@ -165,8 +171,8 @@ async function drain() {
     try {
       await chain.contract.connect(chain.worker).settle.staticCall(j.id, ...result.args);
       checks.push({ name: 'Duplicate settlement', rejected: false });
-    } catch {
-      checks.push({ name: 'Duplicate settlement', rejected: true });
+    } catch (error) {
+      checks.push({ name: 'Duplicate settlement', rejected: error.code === 'CALL_EXCEPTION' });
     }
     update(j, {
       status: 'settled',
@@ -231,15 +237,13 @@ const rateLimit = (req, res, next) => {
   next();
 };
 const cpuTotals = () =>
-  os
-    .cpus()
-    .reduce(
-      (a, c) => ({
-        idle: a.idle + c.times.idle,
-        total: a.total + Object.values(c.times).reduce((s, n) => s + n, 0),
-      }),
-      { idle: 0, total: 0 },
-    );
+  os.cpus().reduce(
+    (a, c) => ({
+      idle: a.idle + c.times.idle,
+      total: a.total + Object.values(c.times).reduce((s, n) => s + n, 0),
+    }),
+    { idle: 0, total: 0 },
+  );
 let cpuSample = cpuTotals();
 app.get('/api/telemetry', (req, res) => {
   const now = cpuTotals(),
@@ -284,18 +288,42 @@ app.get('/api/status', async (req, res) => {
   });
 });
 app.get('/api/jobs', (req, res) => res.json(jobs.slice().reverse().map(publicJob)));
+app.get('/api/transactions/:hash', async (req, res) => {
+  if (!/^0x[0-9a-f]{64}$/i.test(req.params.hash))
+    return res.status(400).json({ error: 'Invalid transaction hash' });
+  const receipt = await chain.provider.getTransactionReceipt(req.params.hash);
+  if (!receipt) return res.status(404).json({ error: 'Receipt not found on this chain' });
+  const tx = await chain.provider.getTransaction(req.params.hash);
+  res.json({
+    chainId: chain.chainId,
+    hash: receipt.hash,
+    blockNumber: receipt.blockNumber,
+    blockHash: receipt.blockHash,
+    status: receipt.status,
+    from: receipt.from,
+    to: receipt.to,
+    value: ethers.formatEther(tx.value),
+    gasUsed: receipt.gasUsed.toString(),
+    events: receipt.logs.map((log) => {
+      try {
+        const event = chain.contract.interface.parseLog(log);
+        return { name: event.name, args: event.args.toArray().map(String) };
+      } catch {
+        return { address: log.address, topics: log.topics };
+      }
+    }),
+  });
+});
 app.get('/api/jobs/:id/bundle', (req, res) => {
   const j = jobs.find((j) => j.id === req.params.id);
   if (!j?.proof) return res.status(404).json({ error: 'No proof available' });
-  res
-    .attachment(`proofline-job-${j.id}.json`)
-    .json({
-      schema: 'proofline/v1',
-      job: publicJob(j),
-      model,
-      verificationKey: JSON.parse(fs.readFileSync('artifacts/verification_key.json')),
-      manifest: JSON.parse(fs.readFileSync('artifacts/manifest.json')),
-    });
+  res.attachment(`proofline-job-${j.id}.json`).json({
+    schema: 'proofline/v1',
+    job: publicJob(j),
+    model,
+    verificationKey: JSON.parse(fs.readFileSync('artifacts/verification_key.json')),
+    manifest: JSON.parse(fs.readFileSync('artifacts/manifest.json')),
+  });
 });
 let submitting = false;
 app.post('/api/jobs', rateLimit, async (req, res) => {
@@ -390,9 +418,7 @@ app.use((error, req, res, next) => {
   res.status(500).json({ error: 'Internal operation failed; inspect operator logs' });
 });
 const http = app.listen(Number(process.env.PORT || 15190), host, () => {
-  console.log(
-    `Proofline: http://${host}:${process.env.PORT || 15190} — ${mode} chain ${chain.chainId}`,
-  );
+  console.log(`Proofline: http://${host}:${http.address().port} — ${mode} chain ${chain.chainId}`);
   drain();
 });
 async function shutdown() {

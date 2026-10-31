@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import path from 'node:path';
 import ganache from 'ganache';
 import solc from 'solc';
 import { ethers } from 'ethers';
@@ -29,18 +30,19 @@ export function compile() {
     consumer: out.contracts['contracts/Proofline.sol'].Proofline,
   };
 }
-export async function connectChain({ ephemeral = false } = {}) {
+export async function connectChain({ ephemeral = false, deploy = false } = {}) {
+  const dataDir = process.env.DATA_DIR || '.local';
   const demo = process.env.MODE !== 'external';
   let local;
   if (demo) {
-    fs.mkdirSync('.local', { recursive: true });
+    fs.mkdirSync(dataDir, { recursive: true });
     local = ganache.provider({
       chain: { chainId: 31337 },
       wallet: {
         mnemonic: 'test test test test test test test test test test test junk',
         totalAccounts: 3,
       },
-      database: ephemeral ? {} : { dbPath: '.local/chain' },
+      database: ephemeral ? {} : { dbPath: path.join(dataDir, 'chain') },
       logging: { quiet: true },
     });
   }
@@ -56,8 +58,12 @@ export async function connectChain({ ephemeral = false } = {}) {
   const thief = demo ? await provider.getSigner(2) : null;
   const contracts = compile();
   const model = JSON.parse(fs.readFileSync('models/sentinel.json'));
-  const deploymentPath = '.local/deployment.json';
+  const deploymentPath = path.join(dataDir, 'deployment.json');
   let address = process.env.CONTRACT_ADDRESS;
+  if (!demo && !address && !deploy)
+    throw new Error(
+      'External mode requires CONTRACT_ADDRESS. Deploy explicitly using scripts/deploy.mjs.',
+    );
   if (demo && !ephemeral && fs.existsSync(deploymentPath)) {
     const saved = JSON.parse(fs.readFileSync(deploymentPath));
     const manifest = fs.readFileSync('artifacts/manifest.json', 'utf8');

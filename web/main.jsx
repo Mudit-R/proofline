@@ -40,6 +40,7 @@ function App() {
     [busy, setBusy] = useState(false),
     [token, setToken] = useState(sessionStorage.getItem('proofline-token') || ''),
     [auth, setAuth] = useState(false),
+    [transaction, setTransaction] = useState(null),
     [copied, setCopied] = useState('');
   async function api(url, options = {}) {
     const res = await fetch('/api' + url, {
@@ -75,7 +76,7 @@ function App() {
     return () => clearInterval(timer);
   }, [token]);
   useEffect(() => {
-    if (!modal && !selected && !auth) return;
+    if (!modal && !selected && !auth && !transaction) return;
     const previous = document.activeElement;
     const dialog = document.querySelector('.overlay:last-of-type [role="dialog"]');
     const controls = () => [...dialog.querySelectorAll('button:not(:disabled),input,a[href]')];
@@ -85,6 +86,7 @@ function App() {
         setModal(false);
         setSelected(null);
         setAuth(false);
+        setTransaction(null);
       }
       if (e.key === 'Tab') {
         const list = controls(),
@@ -104,7 +106,7 @@ function App() {
       document.removeEventListener('keydown', listener);
       previous?.focus();
     };
-  }, [modal, selected?.id, auth]);
+  }, [modal, selected?.id, auth, transaction?.hash]);
   async function submit(e) {
     e.preventDefault();
     setBusy(true);
@@ -735,6 +737,29 @@ function App() {
                 </div>
               ))}
             </div>
+            <div style={{ display: 'flex', gap: 8, marginTop: 15 }}>
+              {[
+                ['Request receipt', selected.requestTx],
+                ['Settlement receipt', selected.settleTx],
+              ]
+                .filter(([, hash]) => hash)
+                .map(([title, hash]) => (
+                  <button
+                    className="button"
+                    key={hash}
+                    onClick={async () => {
+                      try {
+                        setTransaction(await api('/transactions/' + hash));
+                      } catch (e) {
+                        setError(e.message);
+                      }
+                    }}
+                  >
+                    {title}
+                    <ExternalLink size={13} />
+                  </button>
+                ))}
+            </div>
             {selected.proof && (
               <button className="button full" onClick={() => download(selected)}>
                 <Download size={16} />
@@ -765,6 +790,38 @@ function App() {
                 Refund expired escrow
               </button>
             )}
+          </section>
+        </div>
+      )}
+      {transaction && (
+        <div className="overlay" onClick={() => setTransaction(null)}>
+          <section
+            className="modal"
+            role="dialog"
+            aria-modal="true"
+            aria-label="EVM transaction receipt"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="modal-heading">
+              <h2>EVM receipt</h2>
+              <button
+                className="icon-button"
+                aria-label="Close receipt"
+                onClick={() => setTransaction(null)}
+              >
+                <X size={18} />
+              </button>
+            </div>
+            <p>
+              Mined on chain {transaction.chainId}. These values come directly from the connected
+              EVM.
+            </p>
+            <pre style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>
+              {JSON.stringify(transaction, null, 2)}
+            </pre>
+            <button className="button full" onClick={() => copy(transaction.hash)}>
+              Copy transaction hash
+            </button>
           </section>
         </div>
       )}

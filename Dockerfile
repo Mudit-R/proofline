@@ -1,9 +1,9 @@
-FROM node:24-slim
+FROM node:24-slim@sha256:c86ecead9e55a5210ac1727de38a4ca840bf03dcaf34dc9749addbf383b1920c
 WORKDIR /app
 COPY package*.json ./
 RUN npm ci --no-audit --no-fund
-COPY . .
-RUN npm run build && mkdir -p /app/.local /app/artifacts && chown -R node:node /app
+COPY --chown=node:node . .
+RUN npm run build && mkdir -p /app/.local /app/artifacts && chown node:node /app/.local /app/artifacts
 USER node
 ENV HOST=0.0.0.0 PORT=15190 MODE=demo
 EXPOSE 15190

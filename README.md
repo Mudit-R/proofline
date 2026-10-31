@@ -6,6 +6,8 @@
 
 Proofline is an end-to-end computational-integrity workbench: a worker evaluates a trained telemetry classifier, generates a real Groth16 zero-knowledge proof, and submits it to a Solidity verifier. An escrow contract checks the request context before accepting the result and crediting the worker. The dashboard displays actual job states, proof timing, EVM receipts, rewards, and adversarial checks.
 
+![Proofline dashboard displaying real settled local-chain requests](docs/dashboard.png)
+
 It demonstrates how an application can accept outsourced computation without taking the worker's word for the answer. This release uses a local EVM with disposable funds. It is not a public-chain deployment, an audited payment protocol, or a Ritual integration.
 
 ## Run the whole application
@@ -80,7 +82,7 @@ Each model version currently has its own immutable verifier and consumer deploym
 
 ## Evidence and tests
 
-The protocol suite covers genuine healthy and elevated-risk proofs, invalid feature ranges, model substitution, changed outputs and commitments, wrong domains and requesters, front-running, malformed curve points, duplicate settlement, expiry, refunds, and withdrawals. The checked-in [sample proof bundle](docs/evidence/sample-proof.json) includes the verification key and measured local settlement data. Reproduce it with:
+The **29-test** protocol and API suite covers genuine healthy and elevated-risk proofs, invalid feature ranges, model substitution, changed outputs and commitments, wrong domains and requesters, front-running, malformed curve points, duplicate settlement, expiry, refunds, withdrawals, authentication, transaction receipts and input privacy. See [executed validation](docs/VALIDATION.md). The checked-in [sample proof bundle](docs/evidence/sample-proof.json) includes the verification key and measured local settlement data. Reproduce it with:
 
 ```sh
 npm run setup
