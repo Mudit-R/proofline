@@ -1,8 +1,22 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import ganache from 'ganache';
 import solc from 'solc';
 import { ethers } from 'ethers';
+
+function executableBytecode(bytecode) {
+  const code = bytecode.replace(/^0x/i, '').toLowerCase();
+  if (code.length < 8) return code;
+  const metadataLength = Number.parseInt(code.slice(-4), 16);
+  const metadataStart = code.length - (metadataLength + 2) * 2;
+  if (metadataLength <= 0 || metadataStart <= 0) return code;
+  const firstMetadataByte = Number.parseInt(code.slice(metadataStart, metadataStart + 2), 16);
+  // Solidity appends a CBOR map and its byte length to runtime bytecode. It is
+  // non-executable metadata and can vary when source files use different newlines.
+  return Number.isFinite(firstMetadataByte) && firstMetadataByte >> 5 === 5
+    ? code.slice(0, metadataStart)
+    : code;
+}
+
 export function compile() {
   const sources = Object.fromEntries(
     ['artifacts/Groth16Verifier.sol', 'contracts/Proofline.sol'].map((p) => [
@@ -38,6 +52,7 @@ export async function connectChain({ ephemeral = false, deploy = false } = {}) {
   const demo = process.env.MODE !== 'external';
   let local;
   if (demo) {
+    const { default: ganache } = await import('ganache');
     fs.mkdirSync(dataDir, { recursive: true });
     local = ganache.provider({
       chain: { chainId: 31337 },
@@ -112,9 +127,11 @@ export async function connectChain({ ephemeral = false, deploy = false } = {}) {
   if ((await contract.modelId()).toString() !== model.id)
     throw new Error('Deployed model does not match local model.');
   const verifierAddress = await contract.verifier();
+  const deployedVerifierCode = await provider.getCode(verifierAddress);
+  const expectedVerifierCode = '0x' + contracts.verifier.evm.deployedBytecode.object;
   if (
-    (await provider.getCode(verifierAddress)).toLowerCase() !==
-    ('0x' + contracts.verifier.evm.deployedBytecode.object).toLowerCase()
+    deployedVerifierCode.toLowerCase() !== expectedVerifierCode.toLowerCase() &&
+    executableBytecode(deployedVerifierCode) !== executableBytecode(expectedVerifierCode)
   )
     throw new Error('Deployed verifier bytecode does not match pinned proving artifacts');
   return {
