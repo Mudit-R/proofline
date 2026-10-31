@@ -86,6 +86,117 @@ test(
         assert.equal(telemetry.features.length, 4);
         assert.ok(telemetry.features.every((v) => Number.isInteger(v) && v >= 0 && v <= 100));
       });
+      const authRequest = (endpoint, options = {}) =>
+        fetch(url + endpoint, {
+          ...options,
+          headers: { 'Content-Type': 'application/json', ...options.headers },
+        });
+      const firstAccountResponse = await authRequest('/api/auth/register', {
+        method: 'POST',
+        body: JSON.stringify({
+          email: 'Proofline.User@example.com',
+          password: 'test-password-123',
+        }),
+      });
+      assert.equal(firstAccountResponse.status, 201);
+      const firstAccount = await firstAccountResponse.json();
+      const firstAccountCookie = firstAccountResponse.headers
+        .getSetCookie()
+        .find((cookie) => cookie.startsWith('proofline_auth='))
+        .split(';')[0];
+      const accountCall = (cookie, endpoint, options = {}) =>
+        authRequest(endpoint, {
+          ...options,
+          headers: { Cookie: cookie, ...options.headers },
+        });
+      await t.test(
+        'account signup creates a persistent session and normalized identity',
+        async () => {
+          assert.equal(firstAccount.user.email, 'proofline.user@example.com');
+          assert.equal(
+            (await (await accountCall(firstAccountCookie, '/api/auth/me')).json()).user.id,
+            firstAccount.user.id,
+          );
+          assert.equal(
+            (
+              await accountCall(firstAccountCookie, '/api/auth/login', {
+                method: 'POST',
+                body: JSON.stringify({
+                  email: firstAccount.user.email,
+                  password: 'wrong-password-123',
+                }),
+              })
+            ).status,
+            401,
+          );
+        },
+      );
+      const accountJobResponse = await accountCall(firstAccountCookie, '/api/jobs', {
+        method: 'POST',
+        headers: { 'Idempotency-Key': 'account-private-request-1' },
+        body: JSON.stringify({ name: 'Private account request', features: [35, 42, 4, 20] }),
+      });
+      assert.equal(accountJobResponse.status, 201);
+      const accountJob = await accountJobResponse.json();
+      const secondAccountResponse = await authRequest('/api/auth/register', {
+        method: 'POST',
+        body: JSON.stringify({
+          email: 'second.user@example.com',
+          password: 'another-password-456',
+        }),
+      });
+      assert.equal(secondAccountResponse.status, 201);
+      const secondAccountCookie = secondAccountResponse.headers
+        .getSetCookie()
+        .find((cookie) => cookie.startsWith('proofline_auth='))
+        .split(';')[0];
+      await t.test('account request history is isolated between signed-in users', async () => {
+        assert.ok(
+          (await (await accountCall(firstAccountCookie, '/api/jobs')).json()).some(
+            (j) => j.id === accountJob.id,
+          ),
+        );
+        assert.equal(
+          (await (await accountCall(secondAccountCookie, '/api/jobs')).json()).length,
+          0,
+        );
+        assert.equal(
+          (await accountCall(secondAccountCookie, `/api/jobs/${accountJob.id}/bundle`)).status,
+          404,
+        );
+        const duplicate = await authRequest('/api/auth/register', {
+          method: 'POST',
+          body: JSON.stringify({
+            email: 'PROOFLINE.USER@example.com',
+            password: 'test-password-123',
+          }),
+        });
+        assert.equal(duplicate.status, 409);
+      });
+      const loginResponse = await authRequest('/api/auth/login', {
+        method: 'POST',
+        body: JSON.stringify({
+          email: 'PROOFLINE.USER@example.com',
+          password: 'test-password-123',
+        }),
+      });
+      assert.equal(loginResponse.status, 200);
+      const loginCookie = loginResponse.headers
+        .getSetCookie()
+        .find((cookie) => cookie.startsWith('proofline_auth='))
+        .split(';')[0];
+      await t.test('login restores the account and logout revokes its session', async () => {
+        assert.ok(
+          (await (await accountCall(loginCookie, '/api/jobs')).json()).some(
+            (j) => j.id === accountJob.id,
+          ),
+        );
+        assert.equal(
+          (await accountCall(loginCookie, '/api/auth/logout', { method: 'POST' })).status,
+          200,
+        );
+        assert.equal((await (await accountCall(loginCookie, '/api/auth/me')).json()).user, null);
+      });
       const firstVisitor = await fetch(url + '/api/status');
       const visitorCookie = firstVisitor.headers.getSetCookie()[0].split(';')[0];
       const visitorCall = (endpoint, options = {}) =>

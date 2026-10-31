@@ -9,6 +9,15 @@ import { connectChain } from './chain.mjs';
 import { model, commitment, salt, validateFeatures } from './crypto.mjs';
 import { Store } from './store.mjs';
 import { SubmissionService } from './submissions.mjs';
+import {
+  hashPassword,
+  hashSessionToken,
+  normalizeEmail,
+  sessionToken,
+  validEmail,
+  validPassword,
+  verifyPassword,
+} from './auth.mjs';
 
 const mode = process.env.MODE || 'demo',
   host = process.env.HOST || '127.0.0.1';
@@ -25,6 +34,7 @@ if (publicTry && !process.env.SESSION_SECRET)
 const dataDir = process.env.DATA_DIR || '.local';
 fs.mkdirSync(dataDir, { recursive: true });
 const store = await Store.open(dataDir);
+await store.pruneSessions(new Date().toISOString());
 const retentionDays = 7;
 await store.prune(new Date(Date.now() - retentionDays * 86400000).toISOString());
 const jobs = await store.jobs();
@@ -272,7 +282,7 @@ app.disable('x-powered-by');
 if (process.env.TRUST_PROXY_HOPS) app.set('trust proxy', Number(process.env.TRUST_PROXY_HOPS));
 app.use(express.json({ limit: '8kb' }));
 app.get('/healthz', (req, res) => res.json({ ok: true }));
-app.use((req, res, next) => {
+app.use(async (req, res, next) => {
   res.set({
     'X-Content-Type-Options': 'nosniff',
     'Referrer-Policy': 'no-referrer',
@@ -293,13 +303,38 @@ app.use((req, res, next) => {
       provided = req.headers.authorization?.replace(/^Bearer /, '') || '';
     const actual = Buffer.from(provided),
       expected = Buffer.from(token || '');
-    req.operator =
-      !token || (actual.length === expected.length && crypto.timingSafeEqual(actual, expected));
-    if (!req.operator && !publicTry)
-      return res.status(401).json({ error: 'An operator token is required' });
-    if (!req.operator && provided) return res.status(401).json({ error: 'Invalid operator token' });
-    req.owner = 'operator';
-    if (!req.operator) {
+    const validOperator =
+      Boolean(token) &&
+      actual.length === expected.length &&
+      crypto.timingSafeEqual(actual, expected);
+    const accountCookie = (req.headers.cookie || '')
+      .split(';')
+      .map((s) => s.trim())
+      .find((s) => s.startsWith('proofline_auth='))
+      ?.slice('proofline_auth='.length);
+    req.account = null;
+    if (accountCookie && /^[A-Za-z0-9_-]{40,60}$/.test(accountCookie)) {
+      req.account = await store.userForSession(
+        hashSessionToken(accountCookie),
+        new Date().toISOString(),
+      );
+    }
+    req.operator = token ? validOperator : mode === 'demo' && !req.account;
+    const authRoute =
+      (req.method === 'GET' && req.path === '/api/auth/me') ||
+      (req.method === 'POST' &&
+        ['/api/auth/register', '/api/auth/login', '/api/auth/logout'].includes(req.path));
+    if (!req.operator && !req.account && !publicTry && !authRoute)
+      return res.status(401).json({ error: 'Sign in to access your workspace' });
+    if (!req.operator && provided && !validOperator && !authRoute)
+      return res.status(401).json({ error: 'Invalid operator token' });
+    req.owner = req.operator ? 'operator' : req.account ? 'account:' + req.account.id : null;
+    const quotaSecret = process.env.SESSION_SECRET || 'proofline-local-account-quota';
+    req.quotaIp = crypto
+      .createHmac('sha256', quotaSecret)
+      .update(req.ip || req.socket.remoteAddress || 'unknown')
+      .digest('hex');
+    if (!req.operator && !req.account && publicTry) {
       const secret = process.env.SESSION_SECRET;
       const sign = (s) => crypto.createHmac('sha256', secret).update(s).digest('hex');
       const candidate = (req.headers.cookie || '')
@@ -340,6 +375,106 @@ const rateLimit = (req, res, next) => {
     return res.status(429).json({ error: 'Twenty submissions per ten minutes. Please wait.' });
   next();
 };
+const authLimits = new Map();
+function limitAuth(req, res, next) {
+  const key = req.ip || req.socket.remoteAddress;
+  let info = authLimits.get(key);
+  if (!info || info.reset < Date.now()) {
+    info = { count: 0, reset: Date.now() + 600000 };
+    authLimits.set(key, info);
+  }
+  if (authLimits.size > 5000) {
+    for (const address of authLimits.keys()) {
+      authLimits.delete(address);
+      if (authLimits.size <= 4000) break;
+    }
+  }
+  if (++info.count > 10)
+    return res.status(429).json({ error: 'Too many sign-in attempts. Please wait ten minutes.' });
+  next();
+}
+const sessionLifetimeMs = 14 * 24 * 60 * 60 * 1000;
+const safeUser = (user) => ({ id: user.id, email: user.email, createdAt: user.createdAt });
+function setAccountCookie(req, res, token) {
+  res.setHeader(
+    'Set-Cookie',
+    `proofline_auth=${token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${sessionLifetimeMs / 1000}${req.secure ? '; Secure' : ''}`,
+  );
+}
+function clearAccountCookie(req, res) {
+  res.setHeader(
+    'Set-Cookie',
+    `proofline_auth=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0${req.secure ? '; Secure' : ''}`,
+  );
+}
+async function beginAccountSession(req, res, user) {
+  const token = sessionToken(),
+    now = new Date(),
+    expiresAt = new Date(now.getTime() + sessionLifetimeMs);
+  await store.createSession({
+    tokenHash: hashSessionToken(token),
+    userId: user.id,
+    createdAt: now.toISOString(),
+    expiresAt: expiresAt.toISOString(),
+  });
+  setAccountCookie(req, res, token);
+  return safeUser(user);
+}
+app.get('/api/auth/me', (req, res) =>
+  res.json({ user: req.account ? safeUser(req.account) : null, publicTry, authEnabled: true }),
+);
+app.post('/api/auth/register', limitAuth, async (req, res) => {
+  const email = normalizeEmail(req.body?.email),
+    password = req.body?.password;
+  if (!validEmail(email)) return res.status(400).json({ error: 'Enter a valid email address.' });
+  if (!validPassword(password))
+    return res.status(400).json({ error: 'Use a password from 12 to 128 characters.' });
+  const { salt: passwordSalt, hash: passwordHash } = await hashPassword(password);
+  try {
+    const user = await store.createUser({
+      id: crypto.randomUUID(),
+      email,
+      passwordSalt,
+      passwordHash,
+      createdAt: new Date().toISOString(),
+    });
+    res.status(201).json({ user: await beginAccountSession(req, res, user) });
+  } catch (error) {
+    if (
+      error.code === '23505' ||
+      error.code === 'SQLITE_CONSTRAINT_UNIQUE' ||
+      error.message?.includes('UNIQUE constraint failed')
+    )
+      return res
+        .status(409)
+        .json({ error: 'An account for this email already exists. Sign in instead.' });
+    throw error;
+  }
+});
+app.post('/api/auth/login', limitAuth, async (req, res) => {
+  const email = normalizeEmail(req.body?.email),
+    password = req.body?.password;
+  if (!validEmail(email) || typeof password !== 'string' || password.length > 128)
+    return res.status(401).json({ error: 'Email or password is incorrect.' });
+  const user = await store.userByEmail(email);
+  // Do a password hash even for unknown emails to reduce account enumeration by timing.
+  const matches = user
+    ? await verifyPassword(password, user.passwordSalt, user.passwordHash)
+    : await hashPassword(password).then(() => false);
+  if (!matches) return res.status(401).json({ error: 'Email or password is incorrect.' });
+  res.json({ user: await beginAccountSession(req, res, user) });
+});
+app.post('/api/auth/logout', async (req, res) => {
+  const accountCookie = (req.headers.cookie || '')
+    .split(';')
+    .map((s) => s.trim())
+    .find((s) => s.startsWith('proofline_auth='))
+    ?.slice('proofline_auth='.length);
+  if (accountCookie && /^[A-Za-z0-9_-]{40,60}$/.test(accountCookie))
+    await store.revokeSession(hashSessionToken(accountCookie));
+  clearAccountCookie(req, res);
+  res.json({ ok: true });
+});
 const cpuTotals = () =>
   os.cpus().reduce(
     (a, c) => ({
@@ -478,13 +613,14 @@ app.post('/api/jobs', rateLimit, async (req, res) => {
     const key = req.headers['idempotency-key'] || crypto.randomUUID();
     if (typeof key !== 'string' || key.length > 100 || !/^[a-zA-Z0-9_-]+$/.test(key))
       throw new Error('Invalid idempotency key');
-    const scopes = req.operator
-      ? []
-      : [
-          ['visitor:' + req.owner, 3],
-          ['ip:' + req.quotaIp, 10],
-          ['global', 20],
-        ];
+    const scopes =
+      req.operator || !publicTry
+        ? []
+        : [
+            [req.account ? 'account:' + req.account.id : 'visitor:' + req.owner, 3],
+            ['ip:' + req.quotaIp, 10],
+            ['global', 20],
+          ];
     const result = await submissions.submit({
       owner: req.owner,
       key,

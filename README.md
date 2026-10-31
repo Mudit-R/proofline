@@ -92,7 +92,7 @@ Each model version currently has its own immutable verifier and consumer deploym
 
 ## Evidence and tests
 
-The **34-test** protocol, authenticated API and PostgreSQL suite covers genuine proofs, invalid feature ranges, model substitution, changed outputs and commitments, wrong domains and requesters, front-running, malformed curve points, duplicate settlement, expiry, refunds, withdrawals, guest-session isolation, retention, sponsored limits, PostgreSQL quotas and input privacy. See [executed validation](docs/VALIDATION.md). The checked-in [sample proof bundle](docs/evidence/sample-proof.json) includes the verification key and measured local settlement data. Reproduce it with:
+The **37-test** protocol and API suite covers genuine proofs, invalid feature ranges, model substitution, changed outputs and commitments, wrong domains and requesters, front-running, malformed curve points, duplicate settlement, expiry, refunds, withdrawals, account signup/login/logout, per-account job isolation, guest-session isolation, retention, sponsored limits and input privacy. The PostgreSQL integration test runs when `TEST_DATABASE_URL` is configured; it was skipped in the latest local run. See [executed validation](docs/VALIDATION.md). The checked-in [sample proof bundle](docs/evidence/sample-proof.json) includes the verification key and measured local settlement data. Reproduce it with:
 
 ```sh
 npm run setup
@@ -104,7 +104,7 @@ The example bundle is from a local chain. Do not interpret its transaction hash 
 
 ## Deployment and security
 
-The Docker image serves the UI and API on one port, provides a health endpoint, runs as an unprivileged user, serializes proof work in a child process, bounds the proof queue, and persists state. Local runs use SQLite; hosted runs use a separately provisioned PostgreSQL database. Public Sepolia mode scopes request history to signed browser sessions, caps sponsored usage, disables public telemetry and withdrawals, and pauses when testnet balances are low. See [deployment](docs/DEPLOYMENT.md), [threat model](docs/SECURITY.md), and [architecture](docs/ARCHITECTURE.md) before exposing an instance.
+The Docker image serves the UI and API on one port, provides a health endpoint, runs as an unprivileged user, serializes proof work in a child process, bounds the proof queue, and persists state. Local runs use SQLite; hosted runs use a separately provisioned PostgreSQL database. Users can create password accounts; passwords are scrypt-hashed, session tokens are stored as hashes, and job history is isolated per account. The public Sepolia pilot also supports guest sessions, caps sponsored usage, disables public telemetry and withdrawals, and pauses when testnet balances are low. Email verification and password recovery require a mail provider and are not configured in the current deployment. See [deployment](docs/DEPLOYMENT.md), [threat model](docs/SECURITY.md), and [architecture](docs/ARCHITECTURE.md) before exposing an instance.
 
 The default setup is a **single-machine development ceremony**. A trusted setup verified by tooling is not the same as a production multi-party ceremony with independent contributions. No security audit, production trust, real-value custody, or Ritual integration is claimed.
 

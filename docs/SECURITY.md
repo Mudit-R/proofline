@@ -18,6 +18,7 @@ The risk label is an output, not a lending, medical, employment, or financial de
 
 ## Operator and application limits
 
+- Accounts use scrypt password hashes and random, HttpOnly, SameSite cookies. Only session-token hashes are stored in the database; sessions expire after 14 days and can be revoked by signing out. Account IDs scope job history and proof downloads. Signup is self-service and rate-limited per source IP. The current deployment has no email verification or password-reset delivery; users who lose a password cannot recover that account.
 - The coordinator is a trusted, centralized operator for availability, scheduling, input handling, and signing. This project is not a decentralized consensus network.
 - Demo accounts use a published development mnemonic and disposable local funds. They must never receive assets on a real chain.
 - External mode requires separate configured requester/worker keys and an operator token. The hosted public pilot sponsors submissions with those operator accounts; it is not a noncustodial browser-wallet dApp.

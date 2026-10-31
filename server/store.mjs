@@ -16,7 +16,10 @@ export class Store {
     this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000;
       CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY,record TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS submissions(id TEXT PRIMARY KEY,owner TEXT NOT NULL,idempotency TEXT NOT NULL,digest TEXT NOT NULL,record TEXT NOT NULL,UNIQUE(owner,idempotency));
-      CREATE TABLE IF NOT EXISTS quotas(scope TEXT NOT NULL,day TEXT NOT NULL,count INTEGER NOT NULL,PRIMARY KEY(scope,day));`);
+      CREATE TABLE IF NOT EXISTS quotas(scope TEXT NOT NULL,day TEXT NOT NULL,count INTEGER NOT NULL,PRIMARY KEY(scope,day));
+      CREATE TABLE IF NOT EXISTS users(id TEXT PRIMARY KEY,email TEXT NOT NULL UNIQUE,password_salt TEXT NOT NULL,password_hash TEXT NOT NULL,created_at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS sessions(token_hash TEXT PRIMARY KEY,user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,created_at TEXT NOT NULL,expires_at TEXT NOT NULL);
+      CREATE INDEX IF NOT EXISTS sessions_expiry ON sessions(expires_at);`);
   }
   jobs() {
     return this.db
@@ -93,6 +96,51 @@ export class Store {
       this.db.exec('ROLLBACK');
       throw error;
     }
+  }
+  createUser(user) {
+    this.db
+      .prepare(
+        'INSERT INTO users(id,email,password_salt,password_hash,created_at) VALUES(?,?,?,?,?)',
+      )
+      .run(user.id, user.email, user.passwordSalt, user.passwordHash, user.createdAt);
+    return this.userById(user.id);
+  }
+  userByEmail(email) {
+    return (
+      this.db
+        .prepare(
+          'SELECT id,email,password_salt AS passwordSalt,password_hash AS passwordHash,created_at AS createdAt FROM users WHERE email=?',
+        )
+        .get(email) || null
+    );
+  }
+  userById(id) {
+    return (
+      this.db.prepare('SELECT id,email,created_at AS createdAt FROM users WHERE id=?').get(id) ||
+      null
+    );
+  }
+  createSession(session) {
+    this.db
+      .prepare('INSERT INTO sessions(token_hash,user_id,created_at,expires_at) VALUES(?,?,?,?)')
+      .run(session.tokenHash, session.userId, session.createdAt, session.expiresAt);
+  }
+  userForSession(tokenHash, now) {
+    return (
+      this.db
+        .prepare(
+          `SELECT u.id,u.email,u.created_at AS createdAt
+        FROM sessions s JOIN users u ON u.id=s.user_id
+        WHERE s.token_hash=? AND s.expires_at>?`,
+        )
+        .get(tokenHash, now) || null
+    );
+  }
+  revokeSession(tokenHash) {
+    this.db.prepare('DELETE FROM sessions WHERE token_hash=?').run(tokenHash);
+  }
+  pruneSessions(now) {
+    this.db.prepare('DELETE FROM sessions WHERE expires_at<=?').run(now);
   }
   close() {
     this.db.close();

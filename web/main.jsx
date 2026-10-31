@@ -20,6 +20,7 @@ import {
   ExternalLink,
   RefreshCw,
   Wallet,
+  LogOut,
 } from 'lucide-react';
 import './style.css';
 const shorten = (v = '', n = 6) => (v.length > n * 2 ? `${v.slice(0, n)}…${v.slice(-n)}` : v);
@@ -41,6 +42,11 @@ function App() {
     [submissionKey, setSubmissionKey] = useState(() => crypto.randomUUID()),
     [token, setToken] = useState(sessionStorage.getItem('proofline-token') || ''),
     [auth, setAuth] = useState(false),
+    [account, setAccount] = useState(null),
+    [accountModal, setAccountModal] = useState(false),
+    [accountMode, setAccountMode] = useState('login'),
+    [accountBusy, setAccountBusy] = useState(false),
+    [accountError, setAccountError] = useState(''),
     [transaction, setTransaction] = useState(null),
     [copied, setCopied] = useState('');
   async function api(url, options = {}) {
@@ -52,19 +58,24 @@ function App() {
         ...options.headers,
       },
     });
-    if (res.status === 401) {
-      setAuth(true);
-      throw new Error('Enter the operator token to connect.');
-    }
     const data = await res.json();
+    if (res.status === 401 && !url.startsWith('/auth/')) {
+      if (data.error?.includes('operator token') || data.error?.includes('Invalid operator'))
+        setAuth(true);
+      else {
+        setAccountMode('login');
+        setAccountModal(true);
+      }
+    }
     if (!res.ok) throw new Error(data.error || 'Request failed');
     return data;
   }
   async function refresh() {
     try {
-      const [s, j] = await Promise.all([api('/status'), api('/jobs')]);
+      const [s, j, me] = await Promise.all([api('/status'), api('/jobs'), api('/auth/me')]);
       setStatus(s);
       setJobs(j);
+      setAccount(me.user);
       setSelected((old) => (old ? j.find((v) => v.id === old.id) || old : null));
       setError('');
     } catch (e) {
@@ -75,10 +86,10 @@ function App() {
     refresh();
     const timer = setInterval(refresh, 3000);
     return () => clearInterval(timer);
-  }, [token]);
+  }, [token, account?.id]);
   useEffect(() => setSubmissionKey(crypto.randomUUID()), [features, name]);
   useEffect(() => {
-    if (!modal && !selected && !auth && !transaction) return;
+    if (!modal && !selected && !auth && !accountModal && !transaction) return;
     const previous = document.activeElement;
     const dialog = document.querySelector('.overlay:last-of-type [role="dialog"]');
     const controls = () => [...dialog.querySelectorAll('button:not(:disabled),input,a[href]')];
@@ -88,6 +99,7 @@ function App() {
         setModal(false);
         setSelected(null);
         setAuth(false);
+        setAccountModal(false);
         setTransaction(null);
       }
       if (e.key === 'Tab') {
@@ -108,7 +120,7 @@ function App() {
       document.removeEventListener('keydown', listener);
       previous?.focus();
     };
-  }, [modal, selected?.id, auth, transaction?.hash]);
+  }, [modal, selected?.id, auth, accountModal, transaction?.hash]);
   async function submit(e) {
     e.preventDefault();
     setBusy(true);
@@ -126,6 +138,36 @@ function App() {
       setError(e.message);
     } finally {
       setBusy(false);
+    }
+  }
+  async function submitAccount(e) {
+    e.preventDefault();
+    const form = new FormData(e.currentTarget);
+    setAccountBusy(true);
+    setAccountError('');
+    try {
+      const result = await api(`/auth/${accountMode === 'register' ? 'register' : 'login'}`, {
+        method: 'POST',
+        body: JSON.stringify({ email: form.get('email'), password: form.get('password') }),
+      });
+      sessionStorage.removeItem('proofline-token');
+      setToken('');
+      setAccount(result.user);
+      setAccountModal(false);
+      setError('');
+    } catch (e) {
+      setAccountError(e.message);
+    } finally {
+      setAccountBusy(false);
+    }
+  }
+  async function signOut() {
+    try {
+      await api('/auth/logout', { method: 'POST' });
+      setAccount(null);
+      setError('');
+    } catch (e) {
+      setError(e.message);
     }
   }
   async function download(j) {
@@ -298,7 +340,31 @@ function App() {
             <button className="icon-button" aria-label="Refresh workspace" onClick={refresh}>
               <RefreshCw size={16} />
             </button>
-            <span className="avatar small">MR</span>
+            {account ? (
+              <div className="account-chip">
+                <span className="avatar small">{account.email.slice(0, 1).toUpperCase()}</span>
+                <span className="account-email">{account.email}</span>
+                <button
+                  className="icon-button"
+                  aria-label="Sign out"
+                  title="Sign out"
+                  onClick={signOut}
+                >
+                  <LogOut size={15} />
+                </button>
+              </div>
+            ) : (
+              <button
+                className="button account-button"
+                onClick={() => {
+                  setAccountMode('login');
+                  setAccountError('');
+                  setAccountModal(true);
+                }}
+              >
+                Sign in
+              </button>
+            )}
           </div>
         </header>
         <main className="content">
@@ -920,6 +986,79 @@ function App() {
               />
               <button className="button primary full">Connect</button>
             </form>
+          </section>
+        </div>
+      )}
+      {accountModal && (
+        <div
+          className="overlay"
+          onMouseDown={(e) => e.target === e.currentTarget && setAccountModal(false)}
+        >
+          <section
+            className="modal account-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-label={accountMode === 'register' ? 'Create your account' : 'Sign in'}
+          >
+            <div className="modal-heading">
+              <div>
+                <p className="eyebrow">PROOFLINE WORKSPACE</p>
+                <h2>{accountMode === 'register' ? 'Create your account' : 'Welcome back'}</h2>
+              </div>
+              <button
+                className="icon-button"
+                onClick={() => setAccountModal(false)}
+                aria-label="Close sign in"
+              >
+                <X size={18} />
+              </button>
+            </div>
+            <p>Sign in to keep your proof requests private and available across sessions.</p>
+            {accountError && (
+              <div className="error account-error" role="alert">
+                {accountError}
+              </div>
+            )}
+            <form onSubmit={submitAccount}>
+              <label className="field-label">
+                Email address
+                <input name="email" type="email" autoComplete="email" required maxLength={254} />
+              </label>
+              <label className="field-label">
+                Password
+                <input
+                  name="password"
+                  type="password"
+                  autoComplete={accountMode === 'register' ? 'new-password' : 'current-password'}
+                  required
+                  minLength={accountMode === 'register' ? 12 : 1}
+                  maxLength={128}
+                />
+                {accountMode === 'register' && <small>Use at least 12 characters.</small>}
+              </label>
+              <button className="button primary full" disabled={accountBusy}>
+                {accountBusy
+                  ? 'Please wait…'
+                  : accountMode === 'register'
+                    ? 'Create account'
+                    : 'Sign in'}
+                <ArrowRight size={15} />
+              </button>
+            </form>
+            <div className="account-switch">
+              {accountMode === 'register' ? 'Already have an account?' : 'New to Proofline?'}{' '}
+              <button
+                onClick={() => {
+                  setAccountMode(accountMode === 'register' ? 'login' : 'register');
+                  setAccountError('');
+                }}
+              >
+                {accountMode === 'register' ? 'Sign in' : 'Create an account'}
+              </button>
+            </div>
+            <small className="account-note">
+              Email verification and password recovery are not configured yet.
+            </small>
           </section>
         </div>
       )}
